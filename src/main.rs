@@ -4,7 +4,7 @@
 extern crate libc;
 
 use mr_text::ffi::*;
-use std::io::{BufRead, Read, Write};
+use std::{borrow::BorrowMut, io::{BufRead, Read, Write}};
 
 fn main() {
     let mut screen = Screen::new()
