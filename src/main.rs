@@ -4,57 +4,80 @@
 extern crate libc;
 
 use mr_text::ffi::*;
+use ropey::RopeBuilder;
 use std::{
     borrow::BorrowMut,
-    io::{BufRead, Read, Write},
+    io::{BufRead, BufWriter, Error, Read, Stdin, Write},
+    os::{fd::AsRawFd, unix::ffi::OsStrExt},
 };
+
+const ESC_SEQ_CLR_LN: &str = "\x1b[K";
 
 fn main() {
     let mut screen = Screen::new()
-        .init_left_margin()
-        .init_mode_line()
-        .init_text_window()
-        .backup_terminal();
+        .text_window()
+        .mode_line()
+        .left_margin()
+        .backup_terminal()
+        .build();
 
-    screen.clear();
-    screen.position_cursor("1", "3");
-    Screen::draw(&mut screen.io.ostream, &screen.mode_line.seperator_line);
     Screen::draw(&mut screen.io.ostream, &screen.left_margin.seperator_line);
+    Screen::draw(&mut screen.io.ostream, &screen.mode_line.seperator_line);
+    Screen::draw(&mut screen.io.ostream, &screen.mode_line.cursor_pos);
 
+    screen.cursor_to_home(1, 3);
     ffi::configure_raw(&mut screen.io.istream).unwrap();
 
     loop {
-        break;
+        match IO::parse_key(
+            &mut screen.io.istream,
+            &mut screen.io.ostream,
+            &mut screen.io.rope,
+        ) {
+            Some(()) => {}
+            None => break,
+        }
+        screen.update_point();
+        screen.draw_point_pos();
     }
     screen.clear();
-    let _revert_on_drop = ffi::RevertOnDrop::new(screen.io.istream.by_ref(), screen.io.original_term);
+    let _revert_on_drop =
+        ffi::RevertOnDrop::new(screen.io.istream.by_ref(), screen.io.original_term.unwrap());
 }
 
-pub struct Screen<'a> {
+#[derive(Debug)]
+pub struct Screen {
     io: IO,
-    point: Point<'a>,
     text_window: TextWindow,
     mode_line: ModeLine,
     tab_line: TabLine,
     left_margin: LeftMargin,
 }
 
-pub trait Builder<'a> {
-    fn init_text_window(self) -> Screen<'a>;
-    fn init_mode_line(self) -> Screen<'a>;
-    fn new_ml_sep_line(&mut self);
-    fn init_left_margin(self) -> Screen<'a>;
-    fn backup_terminal(self) -> Screen<'a>;
+pub trait Builder {
+    fn text_window(self) -> Self;
+    fn mode_line(self) -> Self;
+    fn left_margin(self) -> Self;
+    fn backup_terminal(self) -> Self;
+    fn build(self) -> Self;
 }
 
-impl<'a> Builder<'a> for Screen<'a> {
-    /// init_text_window has to be built last so that the thickness of the lines
-    /// and margins have been populated.
-    ///
+impl Builder for Screen {
+    /// #Safety
     /// Saftey concern. Possible uninizialized memory in init_text_window().
     /// Panic on error.
 
-    fn init_text_window(mut self) -> Screen<'a> {
+    fn build(mut self) -> Self {
+        Screen {
+            io: self.io,
+            text_window: self.text_window,
+            mode_line: self.mode_line,
+            tab_line: self.tab_line,
+            left_margin: self.left_margin,
+        }
+    }
+
+    fn text_window(mut self) -> Self {
         let mut istream = std::io::stdin();
         let winsize = match ffi::io_ctl(istream.by_ref()) {
             Ok(winsize) => winsize,
@@ -63,47 +86,45 @@ impl<'a> Builder<'a> for Screen<'a> {
         self.text_window = TextWindow {
             winsize_row: winsize.ws_row,
             winsize_col: winsize.ws_col,
-            text_area_row: winsize.ws_row - self.mode_line.thickness,
-            text_area_col: winsize.ws_col - self.left_margin.thickness,
+            text_area_row: winsize.ws_row - 3,
+            text_area_col: winsize.ws_col - 2,
         };
         self
     }
 
-    fn init_left_margin(mut self) -> Screen<'a> {
-        self.left_margin.new_sep('~');
-        self.left_margin.new_thickness(2);
+    fn mode_line(mut self) -> Self {
+        let mut bite_buf = [0; 4];
+        let sep_as_str = '='.encode_utf8(&mut bite_buf);
+        let mut new_line = String::new();
+        for _ in 0..self.text_window.winsize_col {
+            self.mode_line.seperator_line.push_str(sep_as_str);
+        }
 
-        let sep_str = format!("{}\n\r", self.left_margin.seperator);
+        self.mode_line = ModeLine {
+            seperator: '=',
+            thickness: 3,
+            seperator_line: self.mode_line.seperator_line,
+            cursor_pos: "Hello World".to_string(),
+            point: Point::default(),
+        };
+        self
+    }
+
+    fn left_margin(mut self) -> Self {
+        let mut new_line = String::new();
         for _ in 0..self.text_window.winsize_row {
-            self.left_margin.seporator_line.push_str(&sep_str);
+            new_line.push_str("~\n\r");
         }
+
+        self.left_margin = LeftMargin {
+            seperator: '~',
+            thickness: 2,
+            seperator_line: new_line,
+        };
         self
     }
 
-    fn init_mode_line(mut self) -> Screen<'a> {
-        self.mode_line.new_sep('=');
-        self.mode_line.new_thickness(3);
-
-        let mut bite_buf = [0; 4];
-        let sep_as_str = self.mode_line.seperator.encode_utf8(&mut bite_buf);
-        for _ in 0..self.text_window.winsize_col {
-            self.mode_line.seperator_line.push_str(sep_as_str);
-        }
-        self
-    }
-
-    fn new_ml_sep_line(&mut self) {
-        let mut bite_buf = [0; 4];
-        let sep_as_str = self.mode_line.seperator.encode_utf8(&mut bite_buf);
-        // Only reallocates if winsize.winsize_col has increased.
-        self.mode_line.seperator_line.clear();
-        for _ in 0..self.text_window.winsize_col {
-            self.mode_line.seperator_line.push_str(sep_as_str);
-        }
-        // TODO: Add draw method here when I have one written.
-    }
-
-    fn backup_terminal(mut self) -> Screen<'a> {
+    fn backup_terminal(mut self) -> Self {
         self.io.original_term = match ffi::tc_getattr(&mut self.io.istream) {
             Ok(backup) => Some(backup),
             Err(err) => panic!("Error: {}", err),
@@ -112,57 +133,94 @@ impl<'a> Builder<'a> for Screen<'a> {
     }
 }
 
-impl<'a> Screen<'a> {
-    pub fn new() -> Screen<'a> {
+impl Screen {
+    pub fn new() -> Screen {
         Screen {
             io: IO::new(),
-            point: Point::default(),
             text_window: TextWindow::default(),
             mode_line: ModeLine::default(),
             tab_line: TabLine::default(),
             left_margin: LeftMargin::default(),
         }
     }
-    pub fn position_cursor(&mut self, row: &'a str, col: &'a str) {
-        self.point.row = row;
-        self.point.col = col;
-        write!(self.io.ostream, "\x1b[{};{}H", row, col).unwrap();
-        self.io.ostream.flush().unwrap();
+
+    pub fn test(&mut self) {}
+
+    pub fn cursor_to_home(&mut self, row: u16, col: u16) {
+        self.mode_line.point.row = row;
+        self.mode_line.point.col = col;
+        let _ = write!(self.io.ostream, "\x1b[{};{}H", row, col);
+        let _ = self.io.ostream.flush();
     }
 
     pub fn clear(&mut self) {
-        write!(self.io.ostream, "{}[2J", 27 as char).expect("Write failed in clear_screen().");
-        self.io.ostream.flush().expect("Failed post write flush.");
+        let _ = write!(self.io.ostream, "{}[2J", 27 as char);
+        let _ = self.io.ostream.flush();
     }
 
-    //         .write_all("\r\n~ ".as_bytes())
+    pub fn clear_line(&mut self) {
+        let _ = write!(self.io.ostream, "{}", ESC_SEQ_CLR_LN);
+        let _ = self.io.ostream.flush();
+    }
 
-    pub fn draw<T>(stream: &mut T, text: &str)
+    pub fn draw<S>(stream: &mut S, text: &str)
+    where
+        S: Write + ?Sized,
+    {
+        let _ = stream.write_all(text.as_bytes());
+        let _ = stream.flush();
+    }
+
+    pub fn draw_point_pos(&mut self) {
+        let _ = write!(
+            self.io.ostream,
+            "\x1b[{};{}H",
+            self.text_window.winsize_row, 0
+        );
+        let _ = self.io.ostream.flush();
+        self.clear_line();
+        let _ = write!(
+            self.io.ostream,
+            "R: {}, C: {}",
+            self.mode_line.point.row, self.mode_line.point.col
+        );
+        let _ = self.io.ostream.flush();
+        let _ = write!(
+            self.io.ostream,
+            "\x1b[{};{}H",
+            self.mode_line.point.row, self.mode_line.point.col
+        );
+        let _ = self.io.ostream.flush();
+    }
+
+    pub fn keybinding_movement<T>(stream: &mut T, dir: char, lines: Option<u8>)
     where
         T: Write + ?Sized,
     {
-        stream
-            .write_all(text.as_bytes())
-            .expect("Failed to write buffer to ostream.");
-        stream.flush().unwrap();
+        let _ = write!(stream, "\x1b[{}{}", lines.unwrap_or(1), dir);
+        let _ = stream.flush();
     }
 
-    pub fn write_key_stroke(&mut self) {
-        let start = self.io.buffer.len() - self.io.buf_len;
-        self.io
-            .ostream
-            .write_all(&self.io.buffer[start..])
-            .expect("Failed to write buffer to ostream.");
-        self.io.ostream.flush().expect("Failed post write flush.");
-        self.io.istream.lock().consume(self.io.buf_len);
-    }
-
-    pub fn rebuild_ml_seperator_line(&mut self) {
-        let mut bite_buf = [0; 4];
-        let sep_as_str = self.mode_line.seperator.encode_utf8(&mut bite_buf);
-        for _ in 0..self.text_window.winsize_col {
-            self.mode_line.seperator_line.push_str(sep_as_str);
-        }
+    pub fn update_point(&mut self) {
+        let _ = self.io.ostream.write_all(b"\x1b[6n");
+        let _ = self.io.ostream.flush();
+        let mut lock = self.io.istream.lock();
+        let buf = lock.fill_buf().expect("Buffer empty.");
+        let semicolon = buf
+            .into_iter()
+            .position(|chr| *chr == 59)
+            .expect("No semicolon found.");
+        let len = buf.len();
+        let trim = (semicolon + 1, len - 1);
+        self.mode_line.point.row = std::str::from_utf8(&buf[2..semicolon])
+            .unwrap_or("1234")
+            .parse::<u16>()
+            .expect("Parse to u16 failed. ");
+        self.mode_line.point.col = std::str::from_utf8(&buf[trim.0..trim.1])
+            .unwrap_or("1234")
+            .parse::<u16>()
+            .expect("Parse to u16 failed. ");
+        lock.consume(len);
     }
 }
 
@@ -171,48 +229,79 @@ pub struct IO {
     istream: std::io::Stdin,
     ostream: std::io::Stdout,
     estream: std::io::Stderr,
-    buffer: Vec<u8>,
-    buf_len: usize,
+    rope: ropey::RopeBuilder,
+    read_len: usize,
     original_term: Option<libc::termios>,
 }
+
+impl Default for IO {
+    fn default() -> Self {
+        IO::new()
+    }
+}
+
 impl IO {
     pub fn new() -> IO {
         IO {
             istream: std::io::stdin(),
             ostream: std::io::stdout(),
             estream: std::io::stderr(),
-            buffer: Vec::with_capacity(512), // temp data struct
-            buf_len: 0,
+            rope: RopeBuilder::new(),
+            read_len: 0,
             original_term: None,
         }
     }
 
-    pub fn store_buffer<T: std::iter::IntoIterator<Item = u8> + ExactSizeIterator>(
-        &mut self,
-        buf: T,
-    ) {
-        self.buf_len = buf.len();
-        self.buffer = buf.into_iter().collect::<Vec<_>>()
-    }
+    pub fn parse_key<T>(
+        istream: &mut std::io::Stdin,
+        ostream: &mut T,
+        rope: &mut ropey::RopeBuilder,
+    ) -> Option<()>
+    where
+        T: Write + ?Sized,
+    {
+        let mut lock = istream.lock();
+        let mut buffer = lock.fill_buf().expect("istream buffer empty.");
+        let read_len = buffer.len();
 
-    pub fn write_esc_seq(&mut self, escape_seq: &str) {
-        write!(self.ostream, "{}", escape_seq).expect("Failed to write escape seq.");
-        self.ostream.flush().unwrap();
-    }
-    pub fn read_esc_resp(&mut self) {
-        todo!()
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Point<'a> {
-    row: &'a str,
-    col: &'a str,
-}
-impl<'a> Point<'a> {
-    pub fn update_pos(&mut self, row: &'a str, col: &'a str) {
-        self.row = row;
-        self.col = col;
+        match buffer.into_iter().next().expect("istream buffer empty.") {
+            // 8 is backspace
+            2 => {
+                Screen::keybinding_movement(&mut *ostream, 'D', None);
+            } // ctrl + b
+            4 => {
+                // test key
+            }
+            6 => {
+                Screen::keybinding_movement(&mut *ostream, 'C', None);
+            } // ctrl + f
+            9 => {
+                Screen::draw(&mut *ostream, "\t");
+                rope.append("\t");
+            }
+            10 => {
+                Screen::draw(&mut *ostream, "\r\n~ ");
+                rope.append("\n");
+            }
+            14 => {
+                Screen::keybinding_movement(&mut *ostream, 'B', None);
+            } // ctrl + p
+            16 => {
+                Screen::keybinding_movement(&mut *ostream, 'A', None);
+            } // ctrl + n
+            17 => return None,
+            32..=126 => {
+                let mut input = std::str::from_utf8(buffer).expect("Invalid utf8.");
+                rope.append(input);
+                Screen::draw(&mut *ostream, &mut input);
+            }
+            // 127 is del
+            _ => {
+                println!("Key unimplemented: {:?}", buffer);
+            }
+        };
+        lock.consume(read_len);
+        Some(())
     }
 }
 
@@ -225,7 +314,7 @@ pub struct TextWindow {
 }
 impl TextWindow {}
 
-/// Constructs a new mode line struct. The initial field value of ModeLine
+/// Constructs a ModeLine struct. The initial field value of ModeLine
 /// thickness is 3 and the initial seperator is '='. Example shows how to change these settings.
 ///
 /// Use Screen.new_ml_sep_line() to refresh the seporator_line field and apply changes.
@@ -243,10 +332,18 @@ impl TextWindow {}
 /// ``
 
 #[derive(Debug, Default, Clone)]
+pub struct Point {
+    row: u16,
+    col: u16,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct ModeLine {
-    thickness: u8,
+    thickness: u16,
     seperator: char,
     seperator_line: String,
+    cursor_pos: String,
+    point: Point,
 }
 
 impl ModeLine {
@@ -254,12 +351,12 @@ impl ModeLine {
         self.seperator = sep
     }
 
-    pub fn new_thickness(&mut self, thickness: u8) {
+    pub fn new_thickness(&mut self, thickness: u16) {
         self.thickness = thickness
     }
 }
 
-/// Constructs a new left margin struct. The initial field value of LeftMargin
+/// Constructs a new LeftMargin struct. The initial field value of LeftMargin
 /// thickness is 2 and the initial seperator is '~'. Example shows how to change these settings.
 ///
 /// # Examples
@@ -277,7 +374,7 @@ impl ModeLine {
 
 #[derive(Debug, Default, Clone)]
 pub struct LeftMargin {
-    thickness: u8,
+    thickness: u16,
     seperator: char,
     seperator_line: String,
 }
@@ -287,7 +384,7 @@ impl LeftMargin {
         self.seperator = sep
     }
 
-    fn new_thickness(&mut self, thickness: u8) {
+    fn new_thickness(&mut self, thickness: u16) {
         self.thickness = thickness
     }
 }

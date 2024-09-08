@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 libc = { version = "0.2.158", features = ["extra_traits"] }
+ropey = "1.6.1"
