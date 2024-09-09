@@ -3,15 +3,31 @@
 
 extern crate libc;
 
+use core::num;
 use mr_text::ffi::*;
 use ropey::RopeBuilder;
 use std::{
     borrow::BorrowMut,
-    io::{BufRead, BufWriter, Error, Read, Stdin, Write},
+    io::{BufRead, BufWriter, Error, ErrorKind, Read, Stdin, Write},
     os::{fd::AsRawFd, unix::ffi::OsStrExt},
 };
 
 const ESC_SEQ_CLR_LN: &str = "\x1b[K";
+const ESC_SEQ_LEN: usize = 5;
+
+pub enum EscSeq {
+    ClrLn(String),
+    Other(String),
+}
+
+impl EscSeq {
+    pub fn inner(&self) -> &str {
+        match *self {
+            Self::ClrLn(ref ret) => ret,
+            _ => "",
+        }
+    }
+}
 
 fn main() {
     let mut screen = Screen::new()
@@ -25,7 +41,10 @@ fn main() {
     Screen::draw(&mut screen.io.ostream, &screen.mode_line.seperator_line);
     Screen::draw(&mut screen.io.ostream, &screen.mode_line.cursor_pos);
 
-    screen.cursor_to_home(1, 3);
+    match screen.cursor_to_home(1, 3) {
+        Ok(()) => {}
+        Err(err) => panic!("{}", err),
+    }
     ffi::configure_raw(&mut screen.io.istream).unwrap();
 
     loop {
@@ -37,10 +56,19 @@ fn main() {
             Some(()) => {}
             None => break,
         }
-        screen.update_point();
-        screen.draw_point_pos();
+        match screen.update_point(None) {
+            Ok(()) => {}
+            Err(err) => eprintln!("{}", err),
+        };
+        match screen.refresh_point_disp() {
+            Ok(()) => {}
+            Err(err) => panic!("{}", err),
+        }
     }
-    screen.clear();
+    match screen.io.clear() {
+        Ok(()) => {}
+        Err(err) => eprintln!("{}", err),
+    }
     let _revert_on_drop =
         ffi::RevertOnDrop::new(screen.io.istream.by_ref(), screen.io.original_term.unwrap());
 }
@@ -104,7 +132,7 @@ impl Builder for Screen {
             seperator: '=',
             thickness: 3,
             seperator_line: self.mode_line.seperator_line,
-            cursor_pos: "Hello World".to_string(),
+            cursor_pos: "Hi David!".to_string(),
             point: Point::default(),
         };
         self
@@ -146,21 +174,12 @@ impl Screen {
 
     pub fn test(&mut self) {}
 
-    pub fn cursor_to_home(&mut self, row: u16, col: u16) {
+    pub fn cursor_to_home(&mut self, row: u16, col: u16) -> std::io::Result<()> {
         self.mode_line.point.row = row;
         self.mode_line.point.col = col;
-        let _ = write!(self.io.ostream, "\x1b[{};{}H", row, col);
-        let _ = self.io.ostream.flush();
-    }
-
-    pub fn clear(&mut self) {
-        let _ = write!(self.io.ostream, "{}[2J", 27 as char);
-        let _ = self.io.ostream.flush();
-    }
-
-    pub fn clear_line(&mut self) {
-        let _ = write!(self.io.ostream, "{}", ESC_SEQ_CLR_LN);
-        let _ = self.io.ostream.flush();
+        write!(self.io.ostream, "\x1b[{};{}H", row, col)?;
+        self.io.ostream.flush()?;
+        Ok(())
     }
 
     pub fn draw<S>(stream: &mut S, text: &str)
@@ -171,56 +190,111 @@ impl Screen {
         let _ = stream.flush();
     }
 
-    pub fn draw_point_pos(&mut self) {
-        let _ = write!(
+    pub fn refresh_point_disp(&mut self) -> std::io::Result<()> {
+        write!(
             self.io.ostream,
             "\x1b[{};{}H",
             self.text_window.winsize_row, 0
-        );
-        let _ = self.io.ostream.flush();
-        self.clear_line();
-        let _ = write!(
+        )?;
+        self.io.ostream.flush()?;
+        self.io.clear_line()?;
+        write!(
             self.io.ostream,
             "R: {}, C: {}",
             self.mode_line.point.row, self.mode_line.point.col
-        );
-        let _ = self.io.ostream.flush();
-        let _ = write!(
+        )?;
+        self.io.ostream.flush()?;
+        write!(
             self.io.ostream,
             "\x1b[{};{}H",
             self.mode_line.point.row, self.mode_line.point.col
-        );
-        let _ = self.io.ostream.flush();
+        )?;
+        self.io.ostream.flush()?;
+        Ok(())
     }
 
-    pub fn keybinding_movement<T>(stream: &mut T, dir: char, lines: Option<u8>)
-    where
-        T: Write + ?Sized,
-    {
-        let _ = write!(stream, "\x1b[{}{}", lines.unwrap_or(1), dir);
-        let _ = stream.flush();
-    }
-
-    pub fn update_point(&mut self) {
-        let _ = self.io.ostream.write_all(b"\x1b[6n");
-        let _ = self.io.ostream.flush();
+    pub fn update_point(&mut self, buf: Option<&[u8]>) -> std::io::Result<()> {
         let mut lock = self.io.istream.lock();
-        let buf = lock.fill_buf().expect("Buffer empty.");
-        let semicolon = buf
-            .into_iter()
-            .position(|chr| *chr == 59)
-            .expect("No semicolon found.");
-        let len = buf.len();
+        self.io.ostream.write_all(b"\x1b[6n")?;
+        self.io.ostream.flush()?;
+
+        let buf = match lock.fill_buf() {
+            Ok(buf) if buf[..].len() > ESC_SEQ_LEN => {
+                //                println!("{}", buf.len());
+                buf
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {
+                return Ok(());
+            }
+            error => return Ok(()), //panic!("{:?}", error.unwrap()),
+        };
+
+        let len = buf[..].len();
+        let semicolon = match buf.into_iter().position(|chr| *chr == 59) {
+            Some(idx) => idx,
+            None => {
+                lock.consume(len);
+                return Ok(());
+            }
+        };
         let trim = (semicolon + 1, len - 1);
-        self.mode_line.point.row = std::str::from_utf8(&buf[2..semicolon])
-            .unwrap_or("1234")
-            .parse::<u16>()
-            .expect("Parse to u16 failed. ");
-        self.mode_line.point.col = std::str::from_utf8(&buf[trim.0..trim.1])
-            .unwrap_or("1234")
-            .parse::<u16>()
-            .expect("Parse to u16 failed. ");
+        if let Some(row) = from_utf8_escape_seq(buf, 2 as usize, semicolon) {
+            self.mode_line.point.row = match row.parse::<u16>() {
+                Ok(num) => num,
+                Err(err) => {
+                    lock.consume(len);
+                    return Ok(());
+                }
+            };
+        }
+        if let Some(col) = from_utf8_escape_seq(buf, trim.0, trim.1) {
+            self.mode_line.point.col = match col.parse::<u16>() {
+                Ok(num) => num,
+                Err(err) => {
+                    lock.consume(len);
+                    return Ok(());
+                }
+            };
+        }
         lock.consume(len);
+        Ok(())
+    }
+}
+
+///
+/// # Safety
+/// This function is safe because it only uses the unsafe utf8_unchecked() function on code that has already
+/// been checked during the first conversion attempt. The valid subslice is split before the error idx
+/// and has already been checked. As a result the sub slice will never be invalid.
+///
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+///
+/// let valid_buf: &[u8] = &[27, 91, 50, 51, 50, 59, 51, 49, 52, 82];
+/// let valid = from_utf8_escape(valid_buf, 0 as usize, buf.len());
+///
+/// let invalid_buf: &[u8] = &[27, 91, 50, 4, 59, 51, 82];
+/// let invalid = from_utf8_escape(invalid_buf, 0 as usize, buf.len());
+///
+/// assert_eq!(valid, Some("\u{1b}[232;314R"))
+/// assert_eq!(invalid, None)) //
+///
+///
+pub fn from_utf8_escape_seq<'a>(mut buf: &'a [u8], start: usize, end: usize) -> Option<&'a str> {
+    match std::str::from_utf8(&buf[start..end]) {
+        Ok(row) => Some(row),
+        Err(error) => {
+            let (valid, after_valid) = buf.split_at(error.valid_up_to());
+            if valid.len() > ESC_SEQ_LEN {
+                return Some(unsafe { std::str::from_utf8_unchecked(valid) });
+            } else {
+                return None;
+            }
+        }
     }
 }
 
@@ -252,6 +326,26 @@ impl IO {
         }
     }
 
+    pub fn clear(&mut self) -> std::io::Result<()> {
+        write!(self.ostream, "{}[2J", 27 as char)?;
+        self.ostream.flush()?;
+        Ok(())
+    }
+
+    pub fn clear_line(&mut self) -> std::io::Result<()> {
+        write!(self.ostream, "{}", ESC_SEQ_CLR_LN)?;
+        self.ostream.flush()?;
+        Ok(())
+    }
+
+    pub fn keybinding_movement<T>(stream: &mut T, dir: char, lines: Option<u8>)
+    where
+        T: Write + ?Sized,
+    {
+        let _ = write!(stream, "\x1b[{}{}", lines.unwrap_or(1), dir);
+        let _ = stream.flush();
+    }
+
     pub fn parse_key<T>(
         istream: &mut std::io::Stdin,
         ostream: &mut T,
@@ -261,20 +355,25 @@ impl IO {
         T: Write + ?Sized,
     {
         let mut lock = istream.lock();
+        let buf = match lock.fill_buf() {
+            Ok(buf) => buf,
+            Err(e) if e.kind() == ErrorKind::Interrupted => lock.fill_buf().unwrap(),
+            error => error.unwrap(),
+        };
         let mut buffer = lock.fill_buf().expect("istream buffer empty.");
         let read_len = buffer.len();
 
         match buffer.into_iter().next().expect("istream buffer empty.") {
             // 8 is backspace
-            2 => {
-                Screen::keybinding_movement(&mut *ostream, 'D', None);
-            } // ctrl + b
-            4 => {
-                // test key
+            2 | 27 if buffer[1..] == [91, 68] => {
+                // ctrl + b
+                IO::keybinding_movement(&mut *ostream, 'D', None);
             }
-            6 => {
-                Screen::keybinding_movement(&mut *ostream, 'C', None);
-            } // ctrl + f
+            4 => {} // test key
+            6 | 27 if buffer[1..] == [91, 67] => {
+                // ctrl + f
+                IO::keybinding_movement(&mut *ostream, 'C', None);
+            }
             9 => {
                 Screen::draw(&mut *ostream, "\t");
                 rope.append("\t");
@@ -283,23 +382,38 @@ impl IO {
                 Screen::draw(&mut *ostream, "\r\n~ ");
                 rope.append("\n");
             }
-            14 => {
-                Screen::keybinding_movement(&mut *ostream, 'B', None);
-            } // ctrl + p
-            16 => {
-                Screen::keybinding_movement(&mut *ostream, 'A', None);
-            } // ctrl + n
+            14 | 27 if buffer[1..] == [91, 66] => {
+                // ctrl + p
+                IO::keybinding_movement(&mut *ostream, 'B', None);
+            }
+            16 | 27 if buffer[1..] == [91, 65] => {
+                // ctrl + n
+                IO::keybinding_movement(&mut *ostream, 'A', None);
+            }
             17 => return None,
+            27 if buffer[1..] == [120] => {
+                println!("Hi")
+            }
             32..=126 => {
-                let mut input = std::str::from_utf8(buffer).expect("Invalid utf8.");
+                let mut input = match std::str::from_utf8(buffer) {
+                    Ok(input) => input,
+                    Err(error) => match error.error_len() {
+                        Some(len) => {
+                            let (valid, after_valid) = buffer.split_at(error.valid_up_to());
+                            unsafe { std::str::from_utf8_unchecked(valid) }
+                        },
+                        None => return Some(()), // char could be valid?
+                    },
+                };
                 rope.append(input);
                 Screen::draw(&mut *ostream, &mut input);
             }
             // 127 is del
             _ => {
-                println!("Key unimplemented: {:?}", buffer);
+                eprintln!("Key unimplemented: {:?}", buffer);
             }
-        };
+        }
+
         lock.consume(read_len);
         Some(())
     }
@@ -392,3 +506,14 @@ impl LeftMargin {
 #[derive(Debug, Default, Clone)]
 pub struct TabLine {}
 impl TabLine {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_point() {
+        use std::io::Cursor;
+        let mut buff = Cursor::new(vec![0; 15]);
+    }
+}
