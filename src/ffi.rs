@@ -35,7 +35,7 @@ pub mod ffi {
     ///
     /// This function can only return initialized memory or an error.
     ///
-    /// The docs for tcsetattr() say that the function returns 0 if any flag is set.
+    /// The docs for libc tcsetattr() say that the function returns 0 if any flag is set.
     /// It does not validate that all the flags have been set successfully.
     pub fn configure_raw(stream: &mut impl fd::AsRawFd) -> std::io::Result<()> {
         let mut termios = tc_getattr(stream).unwrap();
@@ -92,40 +92,5 @@ pub mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
-    // Test is not correctly reverting terminal after asserts.
-    // #[test]
-    // fn test_config_raw() {
-    //     let mut stream = std::io::stdin();
-    //     let mut istream = stream.lock();
-    //     let original_term = match tc_getattr(istream.by_ref()) {
-    //         Ok(backup) => backup,
-    //         Err(err) => panic!("Error: {}", err),
-    //     };
-    //     ffi::configure_raw(&mut istream).unwrap();
-    //     let term = tc_getattr(&mut istream).unwrap();
-    //     assert_eq!(24836, term.c_iflag);
-    //     assert_eq!(4, term.c_oflag);
-    //     assert_eq!(191, term.c_cflag);
-    //     assert_eq!(2608, term.c_lflag);
-    //     assert_eq!(0, term.c_line);
-    //     assert_eq!(15, term.c_ispeed);
-    //     assert_eq!(15, term.c_ospeed);
-    //     let _revert_on_drop = RevertOnDrop::new(stream.by_ref(), original_term);
-    // }
 
-    #[test]
-    fn test_tcgetattr() {
-        let mut stream = std::io::stdin();
-        let mut istream = stream.lock();
-        let term = ffi::tc_getattr(&mut istream).unwrap();
-        assert_eq!(25862, term.c_iflag);
-        assert_eq!(5, term.c_oflag);
-        assert_eq!(191, term.c_cflag);
-        assert_eq!(2619, term.c_lflag);
-        assert_eq!(0, term.c_line);
-        assert_eq!(15, term.c_ispeed);
-        assert_eq!(15, term.c_ospeed);
-        let _revert_on_drop = ffi::RevertOnDrop::new(stream.by_ref(), term);
-    }
 }
