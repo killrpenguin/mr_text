@@ -1,21 +1,13 @@
-#![allow(unused_imports, unused_variables, unused_mut)]
-#![allow(dead_code)]
-#![feature(inline_const_pat)]
+// #![allow(unused_imports, unused_variables)]
+// #![allow(dead_code)]
 
 extern crate libc;
 
-use core::num;
 use mr_text::ffi::*;
-use mr_text::helpers::*;
-use mr_text::screen::*;
-use ropey::RopeBuilder;
-use std::default;
-use std::time::SystemTime;
+use ropey::Rope;
 use std::{
-    borrow::BorrowMut,
-    io::{BufRead, BufWriter, Error, ErrorKind, Read, Stdin, Write},
-    ops::RangeInclusive,
-    os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    io::{BufRead, ErrorKind, Read, Write},
+    //    os::{fd::AsRawFd, unix::ffi::OsStrExt},
 };
 
 fn main() {
@@ -28,7 +20,7 @@ fn main() {
 
     Screen::write_text(&mut screen.io.ostream, &screen.left_margin.seperator_line);
     Screen::write_text(&mut screen.io.ostream, &screen.mode_line.seperator_line);
-    Screen::write_text(&mut screen.io.ostream, &screen.mode_line.cursor_pos);
+    Screen::write_text(&mut screen.io.ostream, &screen.mode_line.greeting);
 
     match screen.move_cursor(1, 3) {
         Ok(()) => {}
@@ -38,25 +30,17 @@ fn main() {
         Ok(()) => {}
         Err(err) => panic!("{}", err),
     }
-    screen
-        .mode_line
-        .message
-        .store_msg::<&str>("This is a test!");
     loop {
-        match IO::ascii_strategy(
-            &mut screen.io.istream,
-            &mut screen.io.ostream,
-            &mut screen.io.rope,
-        ) {
+        match screen.io.ascii_strategy() {
             Some(()) => {}
             None => break,
         }
-        match screen.update_point(None) {
+        match screen.update_point() {
             Ok(()) => {}
             Err(err) => eprintln!("{}", err),
         };
-        if !screen.mode_line.message.message.is_empty() {
-            screen.mode_line.message.check_msg_timer();
+        if !screen.mode_line.echo_area.message.is_empty() {
+            screen.mode_line.echo_area.check_msg_timer();
         }
         match screen.write_mode_line() {
             Ok(()) => {}
@@ -87,23 +71,26 @@ struct Screen {
     text_window: TextWindow,
     mode_line: ModeLine,
     left_margin: LeftMargin,
+    point: Point,
 }
 
 pub trait Builder {
     fn text_window(self) -> Self;
     fn mode_line(self) -> Self;
     fn left_margin(self) -> Self;
+    fn point(self) -> Self;
     fn backup_terminal(self) -> Self;
     fn build(self) -> Self;
 }
 
 impl Builder for Screen {
-    fn build(mut self) -> Self {
+    fn build(self) -> Self {
         Screen {
             io: self.io,
             text_window: self.text_window,
             mode_line: self.mode_line,
             left_margin: self.left_margin,
+            point: self.point,
         }
     }
 
@@ -116,8 +103,6 @@ impl Builder for Screen {
         self.text_window = TextWindow {
             winsize_row: winsize.ws_row,
             winsize_col: winsize.ws_col,
-            text_area_r: winsize.ws_row - 3,
-            text_area_btm: winsize.ws_col - 2,
         };
         self
     }
@@ -125,7 +110,6 @@ impl Builder for Screen {
     fn mode_line(mut self) -> Self {
         let mut bite_buf = [0; 4];
         let sep_as_str = '='.encode_utf8(&mut bite_buf);
-        let mut new_line = String::new();
         for _ in 0..self.text_window.winsize_col {
             self.mode_line.seperator_line.push_str(sep_as_str);
         }
@@ -134,9 +118,8 @@ impl Builder for Screen {
             seperator: '=',
             thickness: 3,
             seperator_line: self.mode_line.seperator_line,
-            cursor_pos: "Hi David!".to_string(),
-            point: Point::default(),
-            message: Message::default(),
+            greeting: "Hi David!".to_string(),
+            echo_area: EchoArea::default(),
         };
         self
     }
@@ -152,6 +135,11 @@ impl Builder for Screen {
             thickness: 2,
             seperator_line: new_line,
         };
+        self
+    }
+
+    fn point(self) -> Self {
+        Point { row: 0, col: 0 };
         self
     }
 
@@ -171,10 +159,9 @@ impl Screen {
             text_window: TextWindow::default(),
             mode_line: ModeLine::default(),
             left_margin: LeftMargin::default(),
+            point: Point::default(),
         }
     }
-
-    pub fn test_func(&mut self) {}
 
     pub fn move_cursor(&mut self, row: u16, col: u16) -> std::io::Result<()> {
         write!(self.io.ostream, "\x1b[{};{}H", row, col)?;
@@ -200,24 +187,24 @@ impl Screen {
         write!(
             self.io.ostream,
             "R: {}, C: {}",
-            self.mode_line.point.row, self.mode_line.point.col
+            self.point.row, self.point.col
         )?;
         write!(
             self.io.ostream,
             "\x1b[{};{}H",
             self.text_window.winsize_row, 24
         )?;
-        write!(self.io.ostream, "{}", self.mode_line.message)?;
+        write!(self.io.ostream, "{}", self.mode_line.echo_area)?;
         write!(
             self.io.ostream,
             "\x1b[{};{}H",
-            self.mode_line.point.row, self.mode_line.point.col
+            self.point.row, self.point.col
         )?;
         self.io.ostream.flush()?;
         Ok(())
     }
 
-    pub fn update_point(&mut self, buf: Option<&[u8]>) -> std::io::Result<()> {
+    pub fn update_point(&mut self) -> std::io::Result<()> {
         let mut lock = self.io.istream.lock();
         write!(self.io.ostream, "{}", REQ_CURSOR_POS)?;
         self.io.ostream.flush()?;
@@ -227,7 +214,10 @@ impl Screen {
             Err(e) if e.kind() == ErrorKind::Interrupted => {
                 return Ok(());
             }
-            error => return Ok(()),
+            error => {
+                write!(self.io.estream, "{:?}", error)?;
+                return Ok(());
+            }
         };
 
         let len = buf[..].len();
@@ -240,18 +230,20 @@ impl Screen {
         };
         let trim = (semicolon + 1, len - 1);
         if let Some(row) = from_utf8_escape_seq(buf, 2 as usize, semicolon) {
-            self.mode_line.point.row = match row.parse::<u16>() {
+            self.point.row = match row.parse::<u16>() {
                 Ok(num) => num,
                 Err(err) => {
+                    write!(self.io.estream, "{}", err)?;
                     lock.consume(len);
                     return Ok(());
                 }
             };
         }
         if let Some(col) = from_utf8_escape_seq(buf, trim.0, trim.1) {
-            self.mode_line.point.col = match col.parse::<u16>() {
+            self.point.col = match col.parse::<u16>() {
                 Ok(num) => num,
                 Err(err) => {
+                    write!(self.io.estream, "{}", err)?;
                     lock.consume(len);
                     return Ok(());
                 }
@@ -267,7 +259,7 @@ struct IO {
     istream: std::io::Stdin,
     ostream: std::io::Stdout,
     estream: std::io::Stderr,
-    rope: ropey::RopeBuilder,
+    rope: ropey::Rope,
     read_len: usize,
     original_term: Option<libc::termios>,
 }
@@ -284,7 +276,7 @@ impl IO {
             istream: std::io::stdin(),
             ostream: std::io::stdout(),
             estream: std::io::stderr(),
-            rope: RopeBuilder::new(),
+            rope: Rope::new(),
             read_len: 0,
             original_term: None,
         }
@@ -307,35 +299,66 @@ impl IO {
         Ok(())
     }
 
-    pub fn ctrl_keys_strategy<T>(
-        ostream: &mut T,
-        buffer: &[u8],
-        rope: &mut ropey::RopeBuilder,
-    ) -> Option<()>
-    where
-        T: Write + ?Sized,
-    {
+    // pub fn ctrl_keys_strategy<T>(
+    //     ostream: &mut T,
+    //     buffer: &[u8],
+    //     rope: &mut ropey::Rope,
+    // ) -> Option<()>
+    // where
+    //     T: Write + ?Sized,
+    // {
+    //     match buffer {
+    //         [2] => {
+    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
+    //         }
+    //         [4] => {} // test key  TEST_KEY
+    //         [6] => {
+    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvRight(MV_RIGHT)).unwrap();
+    //         }
+    //         [9] => {
+    //             Screen::write_text(&mut *ostream, "\t");
+    //             rope.insert(rope.len_chars(), "\t");
+    //         }
+    //         [10] => {
+    //             Screen::write_text(&mut *ostream, "\n\r~ ");
+    //             rope.insert(rope.len_chars(), "\n");
+    //         }
+    //         [14] => {
+    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvUp(MV_UP)).unwrap();
+    //         }
+    //         [16] => {
+    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
+    //         }
+    //         [17] => {
+    //             return None;
+    //         }
+    //         _ => eprintln!("Key unimplemented: {:?}", buffer),
+    //     }
+    //     Some(())
+    // }
+
+    pub fn ctrl_keys_strategy(&mut self, buffer: &[u8]) -> Option<()> {
         match buffer {
             [2] => {
-                IO::write_esc_seq(&mut *ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
+                IO::write_esc_seq(&mut self.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
             }
             [4] => {} // test key  TEST_KEY
             [6] => {
-                IO::write_esc_seq(&mut *ostream, EscSeq::MvRight(MV_RIGHT)).unwrap();
+                IO::write_esc_seq(&mut self.ostream, EscSeq::MvRight(MV_RIGHT)).unwrap();
             }
             [9] => {
-                Screen::write_text(&mut *ostream, "\t");
-                rope.append("\t");
+                Screen::write_text(&mut self.ostream, "\t");
+                self.rope.insert(self.rope.len_chars(), "\t");
             }
             [10] => {
-                Screen::write_text(&mut *ostream, "\n\r~ ");
-                rope.append("\n");
+                Screen::write_text(&mut self.ostream, "\n\r~ ");
+                self.rope.insert(self.rope.len_chars(), "\n");
             }
             [14] => {
-                IO::write_esc_seq(&mut *ostream, EscSeq::MvUp(MV_UP)).unwrap();
+                IO::write_esc_seq(&mut self.ostream, EscSeq::MvUp(MV_UP)).unwrap();
             }
             [16] => {
-                IO::write_esc_seq(&mut *ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
+                IO::write_esc_seq(&mut self.ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
             }
             [17] => {
                 return None;
@@ -345,15 +368,8 @@ impl IO {
         Some(())
     }
 
-    pub fn ascii_strategy<T>(
-        istream: &mut std::io::Stdin,
-        ostream: &mut T,
-        rope: &mut ropey::RopeBuilder,
-    ) -> Option<()>
-    where
-        T: Write + ?Sized,
-    {
-        let mut lock = istream.lock();
+    pub fn ascii_strategy(&mut self) -> Option<()> {
+        let mut lock = self.istream.lock();
         let buffer = match lock.fill_buf() {
             Ok(buf) => buf,
             Err(e) if e.kind() == ErrorKind::Interrupted => lock.fill_buf().unwrap(),
@@ -362,7 +378,7 @@ impl IO {
 
         let read_len = buffer.len();
         match buffer {
-            [0..=31] => match IO::ctrl_keys_strategy(&mut *ostream, &*buffer, &mut *rope) {
+            [0..=31] => match self.ctrl_keys_strategy(&*buffer) {
                 Some(()) => {
                     lock.consume(read_len);
                     return Some(());
@@ -376,8 +392,9 @@ impl IO {
                 let mut input = match std::str::from_utf8(buffer) {
                     Ok(input) => input,
                     Err(error) => match error.error_len() {
-                        Some(len) => {
-                            let (valid, after_valid) = buffer.split_at(error.valid_up_to());
+                        // TODO: What to do with after_valid?
+                        Some(_len) => {
+                            let (valid, _after_valid) = buffer.split_at(error.valid_up_to());
                             if valid.len() >= 1 {
                                 unsafe { std::str::from_utf8_unchecked(valid) }
                             } else {
@@ -387,22 +404,25 @@ impl IO {
                         None => return Some(()), // char could be valid once utf8 is better implemented.
                     },
                 };
-                rope.append(input);
-                Screen::write_text(&mut *ostream, &mut input);
+                self.rope.insert(self.rope.len_chars(), input);
+                Screen::write_text(&mut self.ostream, &mut input);
             }
             [127] => {
-                // Remove from rope.
-                IO::write_esc_seq(&mut *ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
-                IO::write_esc_seq(&mut *ostream, EscSeq::ClrPntFwd(CLR_LN_CURSR_END)).unwrap();
+                IO::write_esc_seq(&mut self.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
+                IO::write_esc_seq(&mut self.ostream, EscSeq::ClrPntFwd(CLR_LN_CURSR_END)).unwrap();
             }
             _ if buffer.len() > 1 => match buffer {
                 [27, 120] => println!("Hi"),
-                [27, 91, 68] => IO::write_esc_seq(&mut *ostream, EscSeq::MvLeft(MV_LEFT)).unwrap(),
-                [27, 91, 67] => {
-                    IO::write_esc_seq(&mut *ostream, EscSeq::MvRight(MV_RIGHT)).unwrap()
+                [27, 91, 68] => {
+                    IO::write_esc_seq(&mut self.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap()
                 }
-                [27, 91, 66] => IO::write_esc_seq(&mut *ostream, EscSeq::MvUp(MV_UP)).unwrap(),
-                [27, 91, 65] => IO::write_esc_seq(&mut *ostream, EscSeq::MvDown(MV_DOWN)).unwrap(),
+                [27, 91, 67] => {
+                    IO::write_esc_seq(&mut self.ostream, EscSeq::MvRight(MV_RIGHT)).unwrap()
+                }
+                [27, 91, 66] => IO::write_esc_seq(&mut self.ostream, EscSeq::MvUp(MV_UP)).unwrap(),
+                [27, 91, 65] => {
+                    IO::write_esc_seq(&mut self.ostream, EscSeq::MvDown(MV_DOWN)).unwrap()
+                }
                 _ => eprintln!("Key unimplemented: {:?}", buffer),
             },
             _ => {
@@ -415,7 +435,7 @@ impl IO {
     }
 }
 
-/// Use the screen builder method to construct a Point struct or default. This private struct is used
+/// Use the screen builder method to construct Point. This private struct is used
 /// inside ModeLine.
 #[derive(Debug, Default, Clone)]
 struct Point {
@@ -444,8 +464,6 @@ struct Point {
 struct TextWindow {
     winsize_row: u16,
     winsize_col: u16,
-    text_area_r: u16,
-    text_area_btm: u16,
 }
 impl TextWindow {}
 
@@ -470,9 +488,8 @@ pub struct ModeLine {
     thickness: u16,
     seperator: char,
     seperator_line: String,
-    cursor_pos: String,
-    point: Point,
-    message: Message,
+    greeting: String,
+    echo_area: EchoArea,
 }
 
 impl ModeLine {
@@ -483,9 +500,13 @@ impl ModeLine {
     pub fn new_thickness(&mut self, thickness: u16) {
         self.thickness = thickness
     }
+
+    pub fn refresh_sep_line(&mut self) {
+        todo!()
+    }
 }
 
-/// Constructs a new Message struct for the mode line. The disp_len field adjusts the amout of time
+/// Use the screen builder method to constructs a ModeLine struct. The disp_len field adjusts the amout of time
 /// the message will be displayed in the mode line.
 ///
 /// # Examples
@@ -501,29 +522,28 @@ impl ModeLine {
 /// assert_eq!(left_margin.thickness, 10);
 /// ``
 #[derive(Debug, Clone)]
-struct Message {
+struct EchoArea {
     message: String,
     msg_timer: std::time::Instant,
     disp_len: u64,
 }
 
-impl std::fmt::Display for Message {
+impl std::fmt::Display for EchoArea {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-impl Default for Message {
+impl Default for EchoArea {
     fn default() -> Self {
-        Message {
+        EchoArea {
             message: std::string::String::with_capacity(64),
             msg_timer: std::time::Instant::now(),
             disp_len: 10,
         }
     }
 }
-
-impl Message {
+impl EchoArea {
     pub fn new_disp_len(&mut self, len: u64) {
         self.disp_len = len
     }
@@ -534,9 +554,11 @@ impl Message {
         }
     }
 
-    pub fn store_msg<'a, T>(&mut self, msg: &'a str) {
+    pub fn store_msg<'a>(&mut self, msg: &'a str) {
         if msg.len() > self.message.capacity() {
-            self.message.push_str(msg);
+            // Message field created with a capacity of 64.
+            // TODO: Convert to deque data struct and remove capacity.
+            self.message.push_str(&msg[..64]);
         } else {
             self.message.push_str(msg);
         }
@@ -544,43 +566,50 @@ impl Message {
     }
 }
 
-/// Constructs a new LeftMargin struct. The initial field value of LeftMargin
-/// thickness is 2 and the initial seperator is '~'. Example shows how to change these settings.
+/// Use the Screen builder method to construct a new LeftMargin. The thickness field is measured in
+/// terminal rows. Each row is the thickness of one character. The initial field value of LeftMargin
+/// thickness is 2, meaning two rows or about two characters. The initial seperator is '~'.
+/// Example shows how to change these settings. Use the screen builder method a second time to reconstruct
+/// the seperator line.
 ///
 /// # Examples
 ///
 /// ```
+/// let mut screen_ex = Screen::default().left_margin();
 ///
-/// let mut left_margin = LeftMargin::default();
-///
-/// left_margin.new_set('a');
-/// left_margin.new_thickness(10);
+/// screen_ex.left_margin.new_sep('a');
+/// screen_ex.left_margin.new_thickness(10);
+/// screen_ex.left_margin.refresh_sep_line();
 ///
 /// assert_eq!(left_margin.seperator, 'a');
 /// assert_eq!(left_margin.thickness, 10);
 /// ``
 #[derive(Debug, Default, Clone)]
-pub struct LeftMargin {
+struct LeftMargin {
     thickness: u16,
     seperator: char,
     seperator_line: String,
 }
 
 impl LeftMargin {
-    fn new_sep(&mut self, sep: char) {
+    pub fn new_sep(&mut self, sep: char) {
         self.seperator = sep
     }
 
-    fn new_thickness(&mut self, thickness: u16) {
+    pub fn new_thickness(&mut self, thickness: u16) {
         self.thickness = thickness
+    }
+
+    pub fn refresh_sep_line(&mut self) {
+        todo!()
     }
 }
 
 ///
 /// # Safety
-/// This function uses the unsafe utf8_unchecked() function on code that has already
-/// been checked during the first conversion attempt. The valid subslice is split before the error idx
-/// and has already been checked. As a result the sub slice will never be invalid.
+/// If part of the buf argument in returns invalid this function will use the unsafe from_utf8_unchecked
+/// on the valid portion of the code to continue the conversion. The valid subslice is
+/// split before the error index and and has already been validated.
 ///
 ///
 /// # Examples
@@ -599,11 +628,12 @@ impl LeftMargin {
 /// assert_eq!(invalid, None)) //
 ///
 ///
-pub fn from_utf8_escape_seq<'a>(mut buf: &'a [u8], start: usize, end: usize) -> Option<&'a str> {
+pub fn from_utf8_escape_seq<'a>(buf: &'a [u8], start: usize, end: usize) -> Option<&'a str> {
     match std::str::from_utf8(&buf[start..end]) {
         Ok(row) => Some(row),
         Err(error) => {
-            let (valid, after_valid) = buf.split_at(error.valid_up_to());
+            // TODO: Again. What to do with after_valid?
+            let (valid, _after_valid) = buf.split_at(error.valid_up_to());
             if valid.len() > ESC_SEQ_LEN {
                 return Some(unsafe { std::str::from_utf8_unchecked(valid) });
             } else {
