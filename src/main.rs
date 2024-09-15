@@ -1,14 +1,11 @@
-// #![allow(unused_imports, unused_variables)]
-// #![allow(dead_code)]
+#![allow(unused_imports, unused_variables)]
+#![allow(dead_code)]
 
 extern crate libc;
 
 use mr_text::ffi::*;
 use ropey::Rope;
-use std::{
-    io::{BufRead, ErrorKind, Read, Write},
-    //    os::{fd::AsRawFd, unix::ffi::OsStrExt},
-};
+use std::io::{BufRead, ErrorKind, Read, Write};
 
 fn main() {
     let mut screen = Screen::new()
@@ -31,10 +28,11 @@ fn main() {
         Err(err) => panic!("{}", err),
     }
     loop {
-        match screen.io.ascii_strategy() {
+        match screen.ascii_strategy() {
             Some(()) => {}
             None => break,
         }
+        assert_eq!(screen.io.rope.len_bytes(), screen.io.rope.len_chars());
         match screen.update_point() {
             Ok(()) => {}
             Err(err) => eprintln!("{}", err),
@@ -61,16 +59,27 @@ enum EscSeq<'a> {
     MvDown(&'a str),
     MvLeft(&'a str),
     MvRight(&'a str),
+    ScrollDown(&'a str),
+    ScrollUp(&'a str),
     ClrScrn(&'a str),
     ClrPntFwd(&'a str),
+    ClrLn(&'a str),
+    ShowCursor(&'a str),
+    HideCursor(&'a str),
+    ClrScrnCursrFwd(&'a str),
+}
+
+pub enum Scroll {
+    Up,
+    Down,
 }
 
 #[derive(Debug)]
-struct Screen {
+struct Screen<'a> {
     io: IO,
     text_window: TextWindow,
     mode_line: ModeLine,
-    left_margin: LeftMargin,
+    left_margin: LeftMargin<'a>,
     point: Point,
 }
 
@@ -83,7 +92,7 @@ pub trait Builder {
     fn build(self) -> Self;
 }
 
-impl Builder for Screen {
+impl Builder for Screen<'_> {
     fn build(self) -> Self {
         Screen {
             io: self.io,
@@ -131,7 +140,7 @@ impl Builder for Screen {
         }
 
         self.left_margin = LeftMargin {
-            seperator: '~',
+            seperator: "~",
             thickness: 2,
             seperator_line: new_line,
         };
@@ -152,8 +161,8 @@ impl Builder for Screen {
     }
 }
 
-impl Screen {
-    pub fn new() -> Screen {
+impl Screen<'_> {
+    pub fn new() -> Screen<'static> {
         Screen {
             io: IO::new(),
             text_window: TextWindow::default(),
@@ -161,6 +170,11 @@ impl Screen {
             left_margin: LeftMargin::default(),
             point: Point::default(),
         }
+    }
+
+    pub fn test(&mut self) {
+        // rope lines are 0 index. Row's start at 1.
+        //get_chunk_at_line_break
     }
 
     pub fn move_cursor(&mut self, row: u16, col: u16) -> std::io::Result<()> {
@@ -252,124 +266,111 @@ impl Screen {
         lock.consume(len);
         Ok(())
     }
-}
 
-#[derive(Debug)]
-struct IO {
-    istream: std::io::Stdin,
-    ostream: std::io::Stdout,
-    estream: std::io::Stderr,
-    rope: ropey::Rope,
-    read_len: usize,
-    original_term: Option<libc::termios>,
-}
-
-impl Default for IO {
-    fn default() -> Self {
-        IO::new()
-    }
-}
-
-impl IO {
-    pub fn new() -> IO {
-        IO {
-            istream: std::io::stdin(),
-            ostream: std::io::stdout(),
-            estream: std::io::stderr(),
-            rope: Rope::new(),
-            read_len: 0,
-            original_term: None,
+    pub fn scroll_down(&mut self, dir: Scroll) -> std::io::Result<()> {
+        IO::write_esc_seq(&mut self.io.ostream, EscSeq::HideCursor(HIDE_CURSOR))?;
+        IO::write_esc_seq(
+            &mut self.io.ostream,
+            EscSeq::ClrScrnCursrFwd(CLR_SCRN_CURSR_END),
+        )?;
+        write!(self.io.ostream, "\x1b[{};{}H", self.point.row + 1, 1)?;
+        match dir {
+            Scroll::Up => {}
+            Scroll::Down => {
+                IO::write_esc_seq(&mut self.io.ostream, EscSeq::ScrollDown(SCROLL_DOWN))?
+            }
         }
-    }
 
-    fn write_esc_seq<'a, T>(stream: &mut T, key_binding: EscSeq<'a>) -> std::io::Result<()>
-    where
-        T: Write + ?Sized,
-    {
-        let action = match key_binding {
-            EscSeq::MvDown(seq) => seq,
-            EscSeq::MvUp(seq) => seq,
-            EscSeq::MvLeft(seq) => seq,
-            EscSeq::MvRight(seq) => seq,
-            EscSeq::ClrScrn(seq) => seq,
-            EscSeq::ClrPntFwd(seq) => seq,
-        };
-        write!(stream, "{}", action)?;
-        stream.flush()?;
+        Screen::write_text(&mut self.io.ostream, &self.mode_line.seperator_line);
+        write!(self.io.ostream, "\x1b[{};{}H", self.point.row, 1)?;
+        Screen::write_text(&mut self.io.ostream, &self.left_margin.seperator);
+        write!(
+            self.io.ostream,
+            "\x1b[{};{}H",
+            self.point.row, self.point.col
+        )?;
+        IO::write_esc_seq(&mut self.io.ostream, EscSeq::ShowCursor(SHOW_CURSOR))?;
         Ok(())
     }
 
-    // pub fn ctrl_keys_strategy<T>(
-    //     ostream: &mut T,
-    //     buffer: &[u8],
-    //     rope: &mut ropey::Rope,
-    // ) -> Option<()>
-    // where
-    //     T: Write + ?Sized,
-    // {
-    //     match buffer {
-    //         [2] => {
-    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
-    //         }
-    //         [4] => {} // test key  TEST_KEY
-    //         [6] => {
-    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvRight(MV_RIGHT)).unwrap();
-    //         }
-    //         [9] => {
-    //             Screen::write_text(&mut *ostream, "\t");
-    //             rope.insert(rope.len_chars(), "\t");
-    //         }
-    //         [10] => {
-    //             Screen::write_text(&mut *ostream, "\n\r~ ");
-    //             rope.insert(rope.len_chars(), "\n");
-    //         }
-    //         [14] => {
-    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvUp(MV_UP)).unwrap();
-    //         }
-    //         [16] => {
-    //             IO::write_esc_seq(&mut *ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
-    //         }
-    //         [17] => {
-    //             return None;
-    //         }
-    //         _ => eprintln!("Key unimplemented: {:?}", buffer),
-    //     }
-    //     Some(())
-    // }
+    pub fn scroll_up(&mut self) -> std::io::Result<()> {
+        IO::write_esc_seq(&mut self.io.ostream, EscSeq::HideCursor(HIDE_CURSOR))?;
+        IO::write_esc_seq(&mut self.io.ostream, EscSeq::ScrollUp(SCROLL_UP))?;
+        write!(self.io.ostream, "\x1b[{};{}H", 1, 1)?;
+        Screen::write_text(&mut self.io.ostream, &self.left_margin.seperator);
+        write!(self.io.ostream, "\x1b[{};{}H", self.text_window.winsize_row - 1, 1)?;
+        IO::write_esc_seq(
+            &mut self.io.ostream,
+            EscSeq::ClrScrnCursrFwd(CLR_SCRN_CURSR_END),
+        )?;
+        Screen::write_text(&mut self.io.ostream, &self.mode_line.seperator_line);
+        write!(
+            self.io.ostream,
+            "\x1b[{};{}H",
+            self.point.row, self.point.col
+        )?;
+        IO::write_esc_seq(&mut self.io.ostream, EscSeq::ShowCursor(SHOW_CURSOR))?;
+        Ok(())
+    }
 
     pub fn ctrl_keys_strategy(&mut self, buffer: &[u8]) -> Option<()> {
         match buffer {
             [2] => {
-                IO::write_esc_seq(&mut self.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
+                // + 1 for the space after the margin line.
+                if self.point.col > self.left_margin.thickness + 1 {
+                    IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
+                }
             }
-            [4] => {} // test key  TEST_KEY
-            [6] => {
-                IO::write_esc_seq(&mut self.ostream, EscSeq::MvRight(MV_RIGHT)).unwrap();
-            }
+            [6] => IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvRight(MV_RIGHT)).unwrap(),
             [9] => {
-                Screen::write_text(&mut self.ostream, "\t");
-                self.rope.insert(self.rope.len_chars(), "\t");
+                // tab
+                Screen::write_text(&mut self.io.ostream, "\t");
+                self.io.rope.insert(self.io.rope.len_chars(), "\t");
             }
             [10] => {
-                Screen::write_text(&mut self.ostream, "\n\r~ ");
-                self.rope.insert(self.rope.len_chars(), "\n");
+                // Enter
+                self.io.rope.insert(self.io.rope.len_chars(), "\n");
+                if self.point.row <= self.text_window.winsize_row - self.mode_line.thickness {
+                    Screen::write_text(&mut self.io.ostream, "\n\r~ ");
+                } else {
+                    match self.scroll_down(Scroll::Down) {
+                        Ok(()) => {}
+                        Err(err) => self.mode_line.echo_area.store_msg("err"),
+                    }
+                }
             }
             [14] => {
-                IO::write_esc_seq(&mut self.ostream, EscSeq::MvUp(MV_UP)).unwrap();
+                // ctrl + n
+                if self.point.row <= self.text_window.winsize_row - self.mode_line.thickness {
+                    IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
+                } else {
+                    match self.scroll_down(Scroll::Down) {
+                        Ok(()) => {}
+                        Err(err) => self.mode_line.echo_area.store_msg("err"),
+                    }
+                }
             }
             [16] => {
-                IO::write_esc_seq(&mut self.ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
+                // ctrl + p
+                if self.point.row == 1 {
+                    match self.scroll_up() {
+                        Ok(()) => {}
+                        Err(err) => self.mode_line.echo_area.store_msg("err"),
+                    }
+                } else {
+                    IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvUp(MV_UP)).unwrap()
+                }
             }
-            [17] => {
-                return None;
-            }
-            _ => eprintln!("Key unimplemented: {:?}", buffer),
+            [17] => return None,
+
+            // TODO: Add macro to work like println!().
+            _ => self.mode_line.echo_area.store_msg("Key unimplemented"),
         }
         Some(())
     }
 
     pub fn ascii_strategy(&mut self) -> Option<()> {
-        let mut lock = self.istream.lock();
+        let mut lock = self.io.istream.lock();
         let buffer = match lock.fill_buf() {
             Ok(buf) => buf,
             Err(e) if e.kind() == ErrorKind::Interrupted => lock.fill_buf().unwrap(),
@@ -404,34 +405,106 @@ impl IO {
                         None => return Some(()), // char could be valid once utf8 is better implemented.
                     },
                 };
-                self.rope.insert(self.rope.len_chars(), input);
-                Screen::write_text(&mut self.ostream, &mut input);
+                self.io.rope.insert(self.io.rope.len_chars(), input);
+                if self.point.col + 1 >= self.text_window.winsize_col {
+                    write!(self.io.ostream, "\x1b[{};{}H", self.point.row + 1, 3).unwrap();
+                    self.io.rope.insert(self.io.rope.len_chars(), "\r\n");
+                    Screen::write_text(&mut self.io.ostream, &mut input);
+                } else {
+                    Screen::write_text(&mut self.io.ostream, &mut input);
+                }
             }
             [127] => {
-                IO::write_esc_seq(&mut self.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
-                IO::write_esc_seq(&mut self.ostream, EscSeq::ClrPntFwd(CLR_LN_CURSR_END)).unwrap();
+                if self.point.col == self.mode_line.thickness {
+                    self.io.rope.remove(self.io.rope.len_chars() - 1..);
+                }
+
+                IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
+                IO::write_esc_seq(&mut self.io.ostream, EscSeq::ClrPntFwd(CLR_LN_CURSR_END))
+                    .unwrap();
             }
             _ if buffer.len() > 1 => match buffer {
-                [27, 120] => println!("Hi"),
+                [27, 120] => self.mode_line.echo_area.store_msg("Hi!"),
                 [27, 91, 68] => {
-                    IO::write_esc_seq(&mut self.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap()
+                    if self.point.col > self.left_margin.thickness + 1 {
+                        IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap()
+                    }
                 }
                 [27, 91, 67] => {
-                    IO::write_esc_seq(&mut self.ostream, EscSeq::MvRight(MV_RIGHT)).unwrap()
+                    IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvRight(MV_RIGHT)).unwrap()
                 }
-                [27, 91, 66] => IO::write_esc_seq(&mut self.ostream, EscSeq::MvUp(MV_UP)).unwrap(),
+                [27, 91, 66] => {
+                    if self.point.row <= self.text_window.winsize_row - self.mode_line.thickness {
+                        IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvDown(MV_DOWN)).unwrap();
+                    } else {
+                        match self.scroll_down(Scroll::Down) {
+                            Ok(()) => {}
+                            Err(err) => self.mode_line.echo_area.store_msg("err"),
+                        }
+                    }
+                }
                 [27, 91, 65] => {
-                    IO::write_esc_seq(&mut self.ostream, EscSeq::MvDown(MV_DOWN)).unwrap()
+                    if self.point.row > self.mode_line.thickness {
+                        IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvDown(MV_DOWN)).unwrap()
+                    }
                 }
-                _ => eprintln!("Key unimplemented: {:?}", buffer),
+                _ => self.mode_line.echo_area.store_msg("Key unimplemented"),
             },
-            _ => {
-                eprintln!("Key unimplemented: {:?}", buffer);
-            }
+            _ => self.mode_line.echo_area.store_msg("Key unimplemented"),
         }
 
         lock.consume(read_len);
         Some(())
+    }
+}
+
+#[derive(Debug)]
+struct IO {
+    istream: std::io::Stdin,
+    ostream: std::io::Stdout,
+    estream: std::io::Stderr,
+    rope: ropey::Rope,
+    original_term: Option<libc::termios>,
+}
+
+impl Default for IO {
+    fn default() -> Self {
+        IO::new()
+    }
+}
+
+impl IO {
+    pub fn new() -> IO {
+        IO {
+            istream: std::io::stdin(),
+            ostream: std::io::stdout(),
+            estream: std::io::stderr(),
+            rope: Rope::new(),
+            original_term: None,
+        }
+    }
+
+    fn write_esc_seq<'a, T>(stream: &mut T, key_binding: EscSeq<'a>) -> std::io::Result<()>
+    where
+        T: Write + ?Sized,
+    {
+        let action = match key_binding {
+            EscSeq::MvDown(seq) => seq,
+            EscSeq::MvUp(seq) => seq,
+            EscSeq::MvLeft(seq) => seq,
+            EscSeq::MvRight(seq) => seq,
+            EscSeq::ClrScrn(seq) => seq,
+            EscSeq::ClrPntFwd(seq) => seq,
+            EscSeq::ClrLn(seq) => seq,
+            EscSeq::ScrollDown(seq) => seq,
+            EscSeq::ScrollUp(seq) => seq,
+            EscSeq::HideCursor(seq) => seq,
+            EscSeq::ShowCursor(seq) => seq,
+            EscSeq::ClrScrnCursrFwd(seq) => seq,
+        };
+        write!(stream, "{}", action)?;
+        stream.flush()?;
+        Ok(())
     }
 }
 
@@ -465,7 +538,6 @@ struct TextWindow {
     winsize_row: u16,
     winsize_col: u16,
 }
-impl TextWindow {}
 
 /// Use the screen builder method to constructs a ModeLine struct. The initial field value of
 /// ModeLine thickness is 3 and the initial seperator is '='. Example shows how to change these settings.
@@ -539,7 +611,7 @@ impl Default for EchoArea {
         EchoArea {
             message: std::string::String::with_capacity(64),
             msg_timer: std::time::Instant::now(),
-            disp_len: 10,
+            disp_len: 3,
         }
     }
 }
@@ -555,9 +627,9 @@ impl EchoArea {
     }
 
     pub fn store_msg<'a>(&mut self, msg: &'a str) {
+        // Message field created with a capacity of 64.
+        // TODO: Convert to deque data struct and remove capacity.p
         if msg.len() > self.message.capacity() {
-            // Message field created with a capacity of 64.
-            // TODO: Convert to deque data struct and remove capacity.
             self.message.push_str(&msg[..64]);
         } else {
             self.message.push_str(msg);
@@ -585,14 +657,14 @@ impl EchoArea {
 /// assert_eq!(left_margin.thickness, 10);
 /// ``
 #[derive(Debug, Default, Clone)]
-struct LeftMargin {
+struct LeftMargin<'a> {
     thickness: u16,
-    seperator: char,
+    seperator: &'a str,
     seperator_line: String,
 }
 
-impl LeftMargin {
-    pub fn new_sep(&mut self, sep: char) {
+impl<'a> LeftMargin<'a> {
+    pub fn new_sep(&mut self, sep: &'a str) {
         self.seperator = sep
     }
 
@@ -647,13 +719,18 @@ pub fn from_utf8_escape_seq<'a>(buf: &'a [u8], start: usize, end: usize) -> Opti
 const CLR_SCRN: &str = "\x1b[2J";
 const CLR_LN_CURSR_END: &str = "\x1b[0K";
 const CLR_LN: &str = "\x1b[2k";
+const CLR_SCRN_CURSR_END: &str = "\x1b[0J";
 
 const REQ_CURSOR_POS: &str = "\x1b[6n";
+const SCROLL_DOWN: &str = "\x1b[1S";
+const SCROLL_UP: &str = "\x1b[1T";
+const SHOW_CURSOR: &str = "\x1b[?25h";
+const HIDE_CURSOR: &str = "\x1b[?25l";
 
 const MV_LEFT: &str = "\x1b[1D";
 const MV_RIGHT: &str = "\x1b[1C";
-const MV_UP: &str = "\x1b[1B";
-const MV_DOWN: &str = "\x1b[1A";
+const MV_UP: &str = "\x1b[1A";
+const MV_DOWN: &str = "\x1b[1B";
 
 const ESC_SEQ_LEN: usize = 5;
 const UTF8_SIZE: usize = 4;
