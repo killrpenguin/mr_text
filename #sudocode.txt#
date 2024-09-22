@@ -1,0 +1,7 @@
+Run program -> event loop {
+	io event => write to screen
+	Key event => key chord maps
+	mouse event => unimplemented
+}
+
+		

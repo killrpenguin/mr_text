@@ -1,0 +1,19 @@
+In a previous post we looked at how to implement a simple non-blocking I/O system in Rust on Linux using epoll.
+This time around, we’ll go one step further, building a reactor/executor system, where we can register callbacks
+for asynchronous I/O processing. If you’re asking yourself at this point why this is interesting, or useful, I would refer
+to Richard Feynman’s famous quote: "What I cannot create, I do not understand." Of course all of this has been implemented
+already and we could just use async/await and one of the many great async run times in Rust, but that doesn’t mean we have any idea
+what goes on under the hood. The goal in this post is to create a reactor/executor system, which will enable us to register callbacks,
+which are executed every time a async I/O event happens. The example, as in the above mentioned post about epoll,
+will be a very simplistic HTTP server. We’ll start by building the Poll primitive, which will enable us to register read and write
+I/O interest for file descriptors. For this purpose, we create a Registry, which memorizes the registered interests for each file
+descriptor and provides a public interface to modify those. 
+
+Alright, what’s happening here? We provide methods for registering read and write interests and in each case, if there was no interest
+before, we simply register interest in the requested type of event with an epoll_ctl syscall.If there was an entry before, we need to
+use the EPOLL_CTL_MOD flag instead of ADD, but otherwise it’s the same. In any case, we clear the previous interests, setting the new one.
+In a real world implementation it would be possible to have both read and write interests registered at the same time, but in our case,
+we’ll only ever have on of these interests active to simplify things. We also provide a way for removing any interests and closing a file descriptor,
+once we’re done with it. The reactor Now that we have our Poll abstraction with it’s own registry, we’re able to use it within the
+reactor part of our architecture. The reactor instantiates a Poll together with it’s registry and, in a separate thread,
+where the event loop is executed. When new events come in, we’ll send it over a channel to the executor. But let’s go one step at a time.

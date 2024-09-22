@@ -1,0 +1,181 @@
+#![allow(unused_imports, unused_variables)]
+#![allow(dead_code)]
+use std::{
+    io::{BufRead, Error, ErrorKind, Read},
+    str::from_utf8,
+};
+const SEMICOLON: u8 = 59;
+
+pub fn event_loop() {}
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    Key,
+    Mouse,
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Key {
+    Ascii(char),
+    Utf8(char),
+    CursorPos((u16, u16)),
+    CtrlKey(char),
+    AltKey(char),
+    Backspace,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Tab,
+    Delete,
+    Insert,
+    F(u8),
+    Esc,
+}
+
+pub struct KeyEvent {}
+
+impl KeyEvent {
+    pub fn parse_key<R>(mut reader: R) -> std::io::Result<Option<Key>>
+    where
+        R: BufRead,
+    {
+        let buffer = match reader.fill_buf() {
+            Ok(buf) => buf,
+            Err(_) => return Err(std::io::Error::last_os_error()),
+        };
+
+        if buffer.is_empty() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(KeyEvent::is_utf8(&mut buffer.bytes()))
+    }
+
+    pub fn is_utf8<I>(input: &mut I) -> Option<Key>
+    where
+        I: Iterator<Item = Result<u8, std::io::Error>>,
+    {
+        let bytes = &mut Vec::new();
+        loop {
+            match input.next() {
+                Some(Ok(byte)) => {
+                    bytes.push(byte);
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        return Some(Key::Utf8(s.chars().next().unwrap()));
+                    }
+                    if bytes.len() >= 4 {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    pub fn is_utf8_char<I>(first: u8, input: &mut I) -> Option<Key>
+    where
+        I: Iterator<Item = Result<u8, std::io::Error>>,
+    {
+        if first.is_ascii() {
+            return Some(Key::Ascii(first as char));
+        }
+        let bytes = &mut Vec::new();
+        bytes.push(first);
+        loop {
+            match input.next() {
+                Some(Ok(byte)) => {
+                    bytes.push(byte);
+                    dbg!(&bytes);
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        return Some(Key::Utf8(s.chars().next().unwrap()));
+                    }
+                    if bytes.len() >= 4 {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    pub fn is_cursor_pos<I>(input: &mut I) -> Option<Key>
+    where
+        I: Iterator<Item = u8>,
+    {
+        let mut pos: Vec<u8> = vec![];
+        let mut ret_val = (0, 0);
+        loop {
+            match input.next() {
+                Some(byte) => {
+                    if byte.is_ascii_digit() {
+                        pos.push(byte);
+                    }
+                    if byte == b';' {
+                        ret_val.0 = pos.iter().fold(0, |acc, c| acc * 10 + (c - b'0') as u16);
+
+                        pos.clear();
+                    }
+                }
+                _ => break,
+            }
+        }
+        ret_val.1 = pos.iter().fold(0, |acc, c| acc * 10 + (c - b'0') as u16);
+        Some(Key::CursorPos(ret_val))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_key() {
+        let expected = vec![
+            Some(Key::Ascii('a')),
+            Some(Key::Utf8('é')),
+        ];
+        let mut cursor = std::io::Cursor::new("aé");
+        for exp in expected {
+            let res = KeyEvent::parse_key(&mut cursor).unwrap();
+            cursor.set_position(1);
+            assert_eq!(exp, res);
+        }
+    }
+
+    #[test]
+    fn test_is_char() {
+        let mut expected = vec![
+            Key::Ascii('a'),
+            Key::Ascii(';'),
+            Key::Utf8('é'),
+            Key::Utf8('ŷ'),
+            Key::Utf8('¤'),
+            Key::Utf8('£'),
+            Key::Utf8('€'),
+            Key::Utf8('ù'),
+            Key::Ascii('1'),
+        ]
+        .into_iter();
+        let st = "a;éŷ¤£€ù1";
+        let ref mut bytes = st.bytes().map(|x| Ok(x));
+        let chars = st.chars();
+
+        for c in chars {
+            let byte = bytes.next().unwrap().unwrap();
+            assert_eq!(
+                expected.next().unwrap(),
+                KeyEvent::is_utf8_char(byte, bytes).unwrap()
+            )
+        }
+    }
+
+    #[test]
+    fn test_is_cursor_esc() {
+        let input = "\x1b[27;23H";
+        let expected = Key::CursorPos((27, 23));
+        assert_eq!(KeyEvent::is_cursor_pos(&mut input.bytes()), Some(expected));
+    }
+}
