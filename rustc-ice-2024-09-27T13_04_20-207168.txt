@@ -1,0 +1,139 @@
+thread 'rustc' panicked at /rustc/eeb90cda1969383f56a2637cbd3037bdf598841c/compiler/rustc_errors/src/diagnostic.rs:997:9:
+Span must not be empty and have no suggestion
+stack backtrace:
+   0:     0x7f8ce0a89aa5 - <unknown>
+   1:     0x7f8ce0a899f5 - std::backtrace::Backtrace::force_capture::hb19dc667b5c6f1be
+   2:     0x7f8ce2b4d374 - <unknown>
+   3:     0x7f8ce0aa6218 - std::panicking::rust_panic_with_hook::hbc864b8fa012d2fe
+   4:     0x7f8ce0aa5da3 - <unknown>
+   5:     0x7f8ce0aa3269 - <unknown>
+   6:     0x7f8ce0aa5a94 - rust_begin_unwind
+   7:     0x7f8ce0a59f03 - core::panicking::panic_fmt::hbaba928c44b01106
+   8:     0x7f8ce3036906 - <unknown>
+   9:     0x7f8ce3121faf - <unknown>
+  10:     0x7f8ce312efc9 - <unknown>
+  11:     0x7f8ce309ec5d - <unknown>
+  12:     0x7f8ce30a08da - <unknown>
+  13:     0x7f8ce3099fe9 - <unknown>
+  14:     0x7f8ce30b6c6e - <unknown>
+  15:     0x7f8ce30084fd - rustc_hir_analysis[93724b591bd6dc71]::collect::type_of::type_of
+  16:     0x7f8ce4c7e4a8 - <unknown>
+  17:     0x7f8ce4d30bb7 - <unknown>
+  18:     0x7f8ce4b8c315 - <unknown>
+  19:     0x7f8ce4ed2db4 - <unknown>
+  20:     0x7f8ce307b051 - <unknown>
+  21:     0x7f8ce30b58cc - <dyn rustc_hir_analysis[93724b591bd6dc71]::hir_ty_lowering::HirTyLowerer>::lower_path
+  22:     0x7f8ce30b7ede - <unknown>
+  23:     0x7f8ce30b77de - <unknown>
+  24:     0x7f8ce2e453d0 - <unknown>
+  25:     0x7f8ce2f55b6a - <unknown>
+  26:     0x7f8ce30f11ed - <rustc_hir_analysis[93724b591bd6dc71]::collect::ItemCtxt as rustc_hir_analysis[93724b591bd6dc71]::hir_ty_lowering::HirTyLowerer>::lower_fn_sig
+  27:     0x7f8ce30b954a - <dyn rustc_hir_analysis[93724b591bd6dc71]::hir_ty_lowering::HirTyLowerer>::lower_fn_ty
+  28:     0x7f8ce30fca24 - rustc_hir_analysis[93724b591bd6dc71]::collect::fn_sig
+  29:     0x7f8ce4c7da60 - <unknown>
+  30:     0x7f8ce4d3017d - <unknown>
+  31:     0x7f8ce4b8146e - <unknown>
+  32:     0x7f8ce4f59ad3 - <unknown>
+  33:     0x7f8ce3041de1 - <unknown>
+  34:     0x7f8ce306675b - <unknown>
+  35:     0x7f8ce30660ef - <unknown>
+  36:     0x7f8ce2fd61dc - <unknown>
+  37:     0x7f8ce4c61d04 - <unknown>
+  38:     0x7f8ce4ef5d9f - <unknown>
+  39:     0x7f8ce4b96b8a - <unknown>
+  40:     0x7f8ce4b75de4 - <unknown>
+  41:     0x7f8ce4c218d9 - <unknown>
+  42:     0x7f8ce4f1ad6c - <unknown>
+  43:     0x7f8ce4f1a8b0 - <unknown>
+  44:     0x7f8ce4f1a8b0 - <unknown>
+  45:     0x7f8ce4f19a27 - <unknown>
+  46:     0x7f8ce4b79f19 - <unknown>
+  47:     0x7f8ce4f5a2a2 - <unknown>
+  48:     0x7f8ce2f6a6e5 - <unknown>
+  49:     0x7f8ce306867e - rustc_hir_analysis[93724b591bd6dc71]::check_crate
+  50:     0x7f8ce3a58505 - rustc_interface[7d465abb191f4c15]::passes::analysis
+  51:     0x7f8ce4c7e694 - <unknown>
+  52:     0x7f8ce4f5090f - <unknown>
+  53:     0x7f8ce4b93bab - <unknown>
+  54:     0x7f8ce4fab2c8 - <unknown>
+  55:     0x7f8ce2b8a8bb - <unknown>
+  56:     0x7f8ce2b0f97d - <unknown>
+  57:     0x7f8ce2b71678 - <unknown>
+  58:     0x7f8ce2b3d523 - <unknown>
+  59:     0x7f8ce2b7db2a - <unknown>
+  60:     0x7f8ce0ab1e04 - <unknown>
+  61:     0x7f8ce08af648 - <unknown>
+  62:     0x7f8ce0932d4c - <unknown>
+  63:                0x0 - <unknown>
+
+
+rustc version: 1.81.0-nightly (eeb90cda1 2024-09-04) (gentoo)
+platform: x86_64-unknown-linux-gnu
+
+query stack during panic:
+#0 [type_of] computing type of `event::<impl at src/event.rs:11:10: 11:15>`
+#1 [fn_sig] computing function signature of `event::<impl at src/event.rs:11:10: 11:15>::fmt`
+#2 [crate_variances] computing the variances for items in this crate
+#3 [analysis] running analysis passes on this crate
+end of query stack
+thread 'rustc' panicked at /rustc/eeb90cda1969383f56a2637cbd3037bdf598841c/compiler/rustc_errors/src/diagnostic.rs:997:9:
+Span must not be empty and have no suggestion
+stack backtrace:
+   0:     0x7f8ce0a89aa5 - <unknown>
+   1:     0x7f8ce0a899f5 - std::backtrace::Backtrace::force_capture::hb19dc667b5c6f1be
+   2:     0x7f8ce2b4d374 - <unknown>
+   3:     0x7f8ce0aa6218 - std::panicking::rust_panic_with_hook::hbc864b8fa012d2fe
+   4:     0x7f8ce0aa5da3 - <unknown>
+   5:     0x7f8ce0aa3269 - <unknown>
+   6:     0x7f8ce0aa5a94 - rust_begin_unwind
+   7:     0x7f8ce0a59f03 - core::panicking::panic_fmt::hbaba928c44b01106
+   8:     0x7f8ce3036906 - <unknown>
+   9:     0x7f8ce3121faf - <unknown>
+  10:     0x7f8ce312efc9 - <unknown>
+  11:     0x7f8ce309ec5d - <unknown>
+  12:     0x7f8ce30a08da - <unknown>
+  13:     0x7f8ce3099fe9 - <unknown>
+  14:     0x7f8ce30b6c6e - <unknown>
+  15:     0x7f8ce30084fd - rustc_hir_analysis[93724b591bd6dc71]::collect::type_of::type_of
+  16:     0x7f8ce4c7e4a8 - <unknown>
+  17:     0x7f8ce4d30bb7 - <unknown>
+  18:     0x7f8ce4b8c315 - <unknown>
+  19:     0x7f8ce4ed2db4 - <unknown>
+  20:     0x7f8ce30f9859 - <unknown>
+  21:     0x7f8ce30edf74 - <rustc_hir_analysis[93724b591bd6dc71]::collect::CollectItemTypesVisitor as rustc_hir[31855724d43d6d9b]::intravisit::Visitor>::visit_item
+  22:     0x7f8ce31d6cc4 - rustc_hir_analysis[93724b591bd6dc71]::check::wfcheck::check_well_formed
+  23:     0x7f8ce4c66856 - <unknown>
+  24:     0x7f8ce4ef85b3 - <unknown>
+  25:     0x7f8ce4bf5b7a - <unknown>
+  26:     0x7f8ce4dd8671 - <unknown>
+  27:     0x7f8ce2f6a3c5 - <unknown>
+  28:     0x7f8ce2ed5e77 - <unknown>
+  29:     0x7f8ce31e6df0 - rustc_hir_analysis[93724b591bd6dc71]::check::wfcheck::check_mod_type_wf
+  30:     0x7f8ce4c66666 - <unknown>
+  31:     0x7f8ce4ef7f13 - <unknown>
+  32:     0x7f8ce4bc8f0a - <unknown>
+  33:     0x7f8ce4f5a351 - <unknown>
+  34:     0x7f8ce2f6a6e5 - <unknown>
+  35:     0x7f8ce306867e - rustc_hir_analysis[93724b591bd6dc71]::check_crate
+  36:     0x7f8ce3a58505 - rustc_interface[7d465abb191f4c15]::passes::analysis
+  37:     0x7f8ce4c7e694 - <unknown>
+  38:     0x7f8ce4f5090f - <unknown>
+  39:     0x7f8ce4b93bab - <unknown>
+  40:     0x7f8ce4fab2c8 - <unknown>
+  41:     0x7f8ce2b8a8bb - <unknown>
+  42:     0x7f8ce2b0f97d - <unknown>
+  43:     0x7f8ce2b71678 - <unknown>
+  44:     0x7f8ce2b3d523 - <unknown>
+  45:     0x7f8ce2b7db2a - <unknown>
+  46:     0x7f8ce0ab1e04 - <unknown>
+  47:     0x7f8ce08af648 - <unknown>
+  48:     0x7f8ce0932d4c - <unknown>
+  49:                0x0 - <unknown>
+
+
+query stack during panic:
+#0 [type_of] computing type of `event::<impl at src/event.rs:11:17: 11:24>`
+#1 [check_well_formed] checking that `event::<impl at src/event.rs:11:17: 11:24>` is well-formed
+#2 [check_mod_type_wf] checking that types are well-formed in module `event`
+#3 [analysis] running analysis passes on this crate
+end of query stack

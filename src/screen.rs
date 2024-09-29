@@ -1,7 +1,6 @@
 #![allow(unused_imports, unused_variables)]
 #![allow(dead_code)]
 
-
 use crate::ffi;
 use ropey::Rope;
 use std::{
@@ -16,6 +15,7 @@ pub struct Screen<'a> {
     left_margin: LeftMargin<'a>,
     point: Point,
     original_term: Option<libc::termios>,
+    arena: bumpalo::Bump,
     winsize_row: u16,
     winsize_col: u16,
 }
@@ -33,6 +33,7 @@ impl<'a> Screen<'a> {
             left_margin: LeftMargin::default(),
             point: Point::default(),
             original_term: None,
+            arena: bumpalo::Bump::new(),
             winsize_row: winsize.ws_row,
             winsize_col: winsize.ws_col,
         }
@@ -46,18 +47,19 @@ impl<'a> Screen<'a> {
         }
     }
 
-    pub fn update_lm_sep(mut self, sep: &'a str) {
-        self.left_margin.new_sep(sep);
-        self.left_margin.seperator_line.clear();
-        for _ in 0..self.winsize_row {}
-    }
-
-    pub fn clr_msg_timer(&mut self) {
+    pub fn clr_echo_area_timer(&mut self) {
         if self.mode_line.echo_area.msg_timer.elapsed().as_secs()
             == self.mode_line.echo_area.disp_len
         {
             self.mode_line.echo_area.message.clear();
         }
+    }
+
+    pub fn echo_area_msg<M>(&mut self, msg: M)
+    where
+        M: AsRef<str>,
+    {
+        self.mode_line.echo_area.store_message(msg.as_ref());
     }
 
     pub fn copy_original_term(&self) -> libc::termios {
@@ -195,67 +197,6 @@ impl<'a> Screen<'a> {
         self.draw_ml_area();
         let _ = self.point.go_home(&mut ostream);
     }
-
-    pub fn ctrl_keys_strategy(&mut self, buffer: &[u8]) -> Option<()> {
-        let mut ostream = stdout();
-        match buffer {
-            // + 1 for the space after the margin line.
-            [2] if self.point.col > self.left_margin.thickness + 1 => {
-                let _ = Screen::my_write(&mut ostream, MV_LEFT)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-            }
-            // TODO: Switch back to less than once cur_line is more than a place holder.
-            [6] if self.point.col as usize > self.text_window.cur_line => {
-                let _ = Screen::my_write(&mut ostream, MV_RIGHT)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-            }
-            [9] => {
-                // tab
-                let _ = Screen::my_write(&mut ostream, "\t");
-                self.text_window
-                    .rope
-                    .insert(self.text_window.rope.len_chars(), "\t");
-            }
-            [10] => {
-                // Enter
-                self.text_window
-                    .rope
-                    .insert(self.text_window.rope.len_chars(), "\n");
-
-                if self.point.row <= self.text_window.bottom_ln {
-                    let _ = Screen::my_write(&mut ostream, "\n\r~ ")
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                } else {
-                    self.scroll(Scroll::Down)
-                }
-            }
-            [14] => {
-                // ctrl + n
-                if self.point.row <= self.text_window.bottom_ln {
-                    let _ = Screen::my_write(&mut ostream, MV_DOWN)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                } else {
-                    self.scroll(Scroll::Down)
-                }
-            }
-            [16] => {
-                // ctrl + p
-                if self.point.row == 1 {
-                    self.scroll(Scroll::Up)
-                } else {
-                    let _ = Screen::my_write(&mut ostream, MV_UP)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                }
-            }
-            [17] => {
-                // ctrl + q
-                return None;
-            }
-            _ => self.mode_line.echo_area.store_message("Key unimplemented"),
-        }
-        Some(())
-    }
-
     pub fn ascii_strategy(&mut self) -> Option<()> {
         let mut lock = stdin().lock();
         let mut ostream = stdout();
@@ -267,6 +208,9 @@ impl<'a> Screen<'a> {
         };
 
         let read_len = buffer.len();
+        self.mode_line
+            .echo_area
+            .store_message(std::str::from_utf8(buffer).unwrap());
         match buffer {
             [0..=31] => match self.ctrl_keys_strategy(buffer) {
                 Some(()) => {
@@ -301,8 +245,12 @@ impl<'a> Screen<'a> {
 
                 if self.point.col > self.winsize_col {
                     // reposition cursor at start of new line.
-                    let _ = Screen::move_cursor(&mut ostream, self.point.row + 1, 3)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
+                    let _ = Screen::move_cursor::<std::io::Stdout>(
+                        &mut ostream,
+                        self.point.row + 1,
+                        self.left_margin.thickness,
+                    )
+                    .map_err(|e| self.mode_line.echo_area.store_error(e));
 
                     self.text_window
                         .rope
@@ -313,15 +261,17 @@ impl<'a> Screen<'a> {
             }
             [127] => {
                 // This doesn't account for \r\n inserts.
-                if self.point.col == self.mode_line.thickness {
+                if self.text_window.rope.len_chars() != 0 {
                     self.text_window
                         .rope
                         .remove(self.text_window.rope.len_chars() - 1..);
                 }
-                let _ = Screen::my_write(&mut ostream, MV_LEFT)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-                let _ = Screen::my_write(&mut ostream, CLR_LN_CURSR_END)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
+                if self.point.col > self.mode_line.thickness {
+                    let _ = Screen::my_write(&mut ostream, MV_LEFT)
+                        .map_err(|e| self.mode_line.echo_area.store_error(e));
+                    let _ = Screen::my_write(&mut ostream, CLR_LN_CURSR_END)
+                        .map_err(|e| self.mode_line.echo_area.store_error(e));
+                }
             }
             _ if buffer.len() > 1 => match buffer {
                 [27, 120] => self.mode_line.echo_area.store_message("Hi!"),
@@ -357,6 +307,69 @@ impl<'a> Screen<'a> {
         }
 
         lock.consume(read_len);
+        Some(())
+    }
+
+    pub fn ctrl_keys_strategy(&mut self, buffer: &[u8]) -> Option<()> {
+        let mut ostream = stdout();
+        match buffer {
+            // + 1 for the space after the margin line.
+            [2] if self.point.col > self.left_margin.thickness => {
+                let _ = Screen::my_write(&mut ostream, MV_LEFT)
+                    .map_err(|e| self.mode_line.echo_area.store_error(e));
+            }
+            // TODO: Switch back to less than once cur_line is more than a place holder.
+            [6] if self.point.col as usize > self.text_window.cur_line => {
+                let _ = Screen::my_write(&mut ostream, MV_RIGHT)
+                    .map_err(|e| self.mode_line.echo_area.store_error(e));
+            }
+            [9] => {
+                // tab
+                let _ = Screen::my_write(&mut ostream, "\t");
+                self.text_window
+                    .rope
+                    .insert(self.text_window.rope.len_chars(), "\t");
+            }
+            [10] => {
+                // Enter
+                self.text_window
+                    .rope
+                    .insert(self.text_window.rope.len_chars(), "\n");
+
+                if self.point.row <= self.text_window.bottom_ln {
+                    let _ = Screen::move_cursor(
+                        &mut ostream,
+                        self.point.row + 1,
+                        self.left_margin.thickness,
+                    );
+                } else {
+                    self.scroll(Scroll::Down)
+                }
+            }
+            [14] => {
+                // ctrl + n
+                if self.point.row <= self.text_window.bottom_ln {
+                    let _ = Screen::my_write(&mut ostream, MV_DOWN)
+                        .map_err(|e| self.mode_line.echo_area.store_error(e));
+                } else {
+                    self.scroll(Scroll::Down)
+                }
+            }
+            [16] => {
+                // ctrl + p
+                if self.point.row == 1 {
+                    self.scroll(Scroll::Up)
+                } else {
+                    let _ = Screen::my_write(&mut ostream, MV_UP)
+                        .map_err(|e| self.mode_line.echo_area.store_error(e));
+                }
+            }
+            [17] => {
+                // ctrl + q
+                return None;
+            }
+            _ => self.mode_line.echo_area.store_message("Key unimplemented"),
+        }
         Some(())
     }
 }
@@ -396,7 +409,7 @@ impl DrawScreen for Screen<'_> {
             match write!(
                 ostream,
                 "{}\x1b[{};{}H{}\x1b[{};{}H{}",
-                HIDE_CURSOR, row, 4, CLR_LN_UPTO_CURSR, row, 1, num
+                HIDE_CURSOR, row, self.left_margin.thickness, CLR_LN_UPTO_CURSR, row, 1, num
             ) {
                 Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::Interrupted => self.clear_screen(),
@@ -407,7 +420,7 @@ impl DrawScreen for Screen<'_> {
             match write!(
                 ostream,
                 "{}\x1b[{};{}H{}\x1b[{};{}H{}",
-                HIDE_CURSOR, row, 4, CLR_LN_UPTO_CURSR, row, 1, num
+                HIDE_CURSOR, row, self.left_margin.thickness, CLR_LN_UPTO_CURSR, row, 1, num
             ) {
                 Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::Interrupted => self.clear_screen(),
@@ -416,7 +429,7 @@ impl DrawScreen for Screen<'_> {
         }
         match write!(
             ostream,
-            "\x1b[{};{}H{} {}",
+            "\x1b[{};{}H{}{}",
             self.point.row, 1, CLR_LN_UPTO_CURSR, self.left_margin.indicator
         ) {
             Ok(_) => {}
@@ -431,7 +444,7 @@ impl DrawScreen for Screen<'_> {
         match write!(
             ostream,
             "{}{}{}{}",
-            HIDE_CURSOR, CLR_SCRN, &self.left_margin.seperator_line, &self.mode_line.start_greeting
+            HIDE_CURSOR, CLR_SCRN, self.left_margin.seperator_line, &self.mode_line.start_greeting
         ) {
             Ok(_) => {}
             Err(err) if err.kind() == ErrorKind::Interrupted => self.draw_screen(),
@@ -502,6 +515,7 @@ impl Builder for Screen<'_> {
             left_margin: self.left_margin,
             point: self.point,
             original_term: self.original_term,
+            arena: self.arena,
             winsize_row: self.winsize_row,
             winsize_col: self.winsize_col,
         }
@@ -537,9 +551,47 @@ impl Builder for Screen<'_> {
     }
 
     fn left_margin(mut self) -> Self {
+        let winsize_row = 60;
         let mut new_line = std::string::String::new();
-        for _ in 0..self.winsize_row {
-            new_line.push_str("~\n\r");
+        let rng: (i32, i32) = ((winsize_row as i32) * -1, winsize_row as i32);
+        let mut disp_number = (rng.0..rng.1).into_iter();
+        let mut term_row = (1..=rng.1).into_iter();
+
+        loop {
+            let mut num_row: (i32, i32) = match (disp_number.next(), term_row.next()) {
+                (Some(num), Some(row)) => (num, row),
+                (Some(_), None) => {
+                    term_row = (1..=rng.1).into_iter();
+                    (0, 0)
+                }
+                _ => break,
+            };
+            if num_row.0.is_negative() {
+                num_row.0 = num_row.0 * -1;
+            }
+            if num_row.0 != 0 {
+                new_line.push_str(&format!(
+                    "{}\x1b[{};{}H{}\x1b[{};{}H{}",
+                    HIDE_CURSOR,
+                    num_row.1,
+                    self.left_margin.thickness,
+                    CLR_LN_UPTO_CURSR,
+                    num_row.1,
+                    1,
+                    num_row.0
+                ));
+            } else {
+                new_line.push_str(&format!(
+                    "{}\x1b[{};{}H{}\x1b[{};{}H {}",
+                    HIDE_CURSOR,
+                    num_row.1,
+                    self.left_margin.thickness,
+                    CLR_LN_UPTO_CURSR,
+                    num_row.1,
+                    1,
+                    self.left_margin.indicator
+                ));
+            }
         }
 
         self.left_margin = LeftMargin {
@@ -709,14 +761,27 @@ impl EchoArea {
 /// Use the Screen builder method to construct a new LeftMargin. The thickness field is measured in
 /// terminal rows. Each row is the thickness of one terminal character. The initial field value of LeftMargin
 /// thickness is 2, meaning two rows or two characters. The initial seperator is "~".
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
 pub struct LeftMargin<'a> {
     thickness: u16,
     indicator: &'a str,
     seperator_line: std::string::String,
 }
 
+impl<'a> std::default::Default for LeftMargin<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> LeftMargin<'a> {
+    pub fn new() -> Self {
+        LeftMargin {
+            thickness: 0,
+            indicator: " =>",
+            seperator_line: String::new(),
+        }
+    }
     pub fn new_sep(&mut self, indicator: &'a str) {
         self.indicator = indicator
     }
@@ -741,6 +806,48 @@ pub fn from_utf8_escape_seq(buf: &[u8], start: usize, end: usize) -> Option<&str
             } else {
                 None
             }
+        }
+    }
+}
+
+pub enum EscSeq {
+    ClrScrn,          //  "\x1b[2J";
+    ClrLn,            //  "\x1b[2K";
+    ClrScrnCursrEnd,  //  "\x1b[0J";
+    ClrLnCursrEnd,    //  "\x1b[0K";
+    ClrLnBeforeCursr, //  "\x1b[1K";
+
+    GetCursorPos,           //  "\x1b[6n";
+    MoveCursor((u16, u16)), // "\x1b[{};{}H"
+    ShowCursor,             //  "\x1b[?25h";
+    HideCursor,             //  "\x1b[?25l";
+
+    ScrollUp,   //  "\x1b[1T";
+    ScrollDown, //  "\x1b[1S";
+    MvLeft,     //  "\x1b[1D";
+    MvRight,    //  "\x1b[1C";
+    MvUp,       //  "\x1b[1A";
+    MvDown,     //  "\x1b[1B";
+}
+
+impl std::fmt::Display for EscSeq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            EscSeq::ClrScrn => write!(f, "\x1b[2J"),
+            EscSeq::ClrLn => write!(f, "\x1b[2K"),
+            EscSeq::ClrScrnCursrEnd => write!(f, "\x1b[0J"),
+            EscSeq::ClrLnCursrEnd => write!(f, "\x1b[0K"),
+            EscSeq::ClrLnBeforeCursr => write!(f, "\x1b[1K"),
+            EscSeq::GetCursorPos => write!(f, "\x1b[6n"),
+            EscSeq::MoveCursor((r, c)) => write!(f, "\x1b[{};{}H", r, c),
+            EscSeq::ShowCursor => write!(f, "\x1b[?25h"),
+            EscSeq::HideCursor => write!(f, "\x1b[?25l"),
+            EscSeq::ScrollUp => write!(f, "\x1b[1T"),
+            EscSeq::ScrollDown => write!(f, "\x1b[1S"),
+            EscSeq::MvLeft => write!(f, "\x1b[1D"),
+            EscSeq::MvRight => write!(f, "\x1b[1C"),
+            EscSeq::MvUp => write!(f, "\x1b[1A"),
+            EscSeq::MvDown => write!(f, "\x1b[1B"),
         }
     }
 }

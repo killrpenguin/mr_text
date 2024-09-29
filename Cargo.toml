@@ -7,3 +7,4 @@ edition = "2021"
 bumpalo = { version = "3.16.0",  features = ["collections", "boxed"]}
 libc = { version = "0.2.158", features = ["extra_traits"] }
 ropey = "1.6.1"
+smallvec = { version = "1.13.2", features = ["const_generics", "write"] }

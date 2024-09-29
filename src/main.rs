@@ -1,39 +1,24 @@
 #![allow(unused_imports, unused_variables)]
 #![allow(dead_code)]
-const CLR_SCRN: &str = "\x1b[2J";
 
 extern crate libc;
+use std::env;
+
 use mr_text::{
+    program,
+    document::{self, Doc, Document, NewDocument},
     ffi,
     screen::{self, Builder, DrawScreen, Screen},
 };
 
 fn main() {
-    let mut screen = Screen::new()
-        .mode_line()
-        .left_margin()
-        .point()
-        .text_window()
-        .backup_terminal()
-        .build();
+    let args: Vec<String> = env::args().collect();
+    let mut mr_text = program::MrText::<NewDocument>::new();
 
-    let mut drop_stream = std::io::stdin();
-    let _revert_on_drop = ffi::RevertOnDrop::new(&mut drop_stream, screen.copy_original_term());
-
-    Screen::raw_mode();
-    screen.clear_screen();
-    screen.draw_ml_area();
-    screen.draw_numbered_lm();
-    loop {
-        match screen.ascii_strategy() {
-            Some(()) => {}
-            None => break,
-        }
-        screen.update_point::<std::io::Stdout>().unwrap_or(());
-        screen.draw_ml_area();
-        screen.clr_msg_timer();
-        screen.draw_numbered_lm();
+    if args.is_empty() {
+        mr_text.event_loop();
+    } else {
+        mr_text.open_doc(&args[0]);
+        mr_text.event_loop();
     }
-    screen.clear_screen();
 }
-

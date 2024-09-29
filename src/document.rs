@@ -1,10 +1,10 @@
-// #![allow(unused_imports, unused_variables)]
-// #![allow(dead_code)]
+#![allow(unused_imports, unused_variables)]
+#![allow(dead_code)]
 
 use ropey::Rope;
 use std::{io::BufWriter, ops::RangeBounds};
 
-trait Doc {
+pub trait Doc {
     fn parse_file_name(name: &str) -> (String, String) {
         if let Some(pos) = name.chars().position(|letter| letter == '.') {
             (name[..pos].to_string(), name[pos..].to_string())

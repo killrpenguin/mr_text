@@ -21,6 +21,7 @@ dependencies = [
  "bumpalo",
  "libc",
  "ropey",
+ "smallvec",
 ]
 
 [[package]]

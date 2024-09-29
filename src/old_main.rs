@@ -125,7 +125,7 @@ impl Builder for Screen<'_> {
 
         self.mode_line = ModeLine {
             seperator: '=',
-            thickness: 3,
+            thickness: 5,
             seperator_line: self.mode_line.seperator_line,
             greeting: "Hi David!".to_string(),
             echo_area: EchoArea::default(),
@@ -141,7 +141,7 @@ impl Builder for Screen<'_> {
 
         self.left_margin = LeftMargin {
             seperator: "~",
-            thickness: 2,
+            thickness: 5,
             seperator_line: new_line,
         };
         self
@@ -298,7 +298,12 @@ impl Screen<'_> {
         IO::write_esc_seq(&mut self.io.ostream, EscSeq::ScrollUp(SCROLL_UP))?;
         write!(self.io.ostream, "\x1b[{};{}H", 1, 1)?;
         Screen::write_text(&mut self.io.ostream, &self.left_margin.seperator);
-        write!(self.io.ostream, "\x1b[{};{}H", self.text_window.winsize_row - 1, 1)?;
+        write!(
+            self.io.ostream,
+            "\x1b[{};{}H",
+            self.text_window.winsize_row - 1,
+            1
+        )?;
         IO::write_esc_seq(
             &mut self.io.ostream,
             EscSeq::ClrScrnCursrFwd(CLR_SCRN_CURSR_END),
@@ -317,7 +322,7 @@ impl Screen<'_> {
         match buffer {
             [2] => {
                 // + 1 for the space after the margin line.
-                if self.point.col > self.left_margin.thickness + 1 {
+                if self.point.col > self.left_margin.thickness {
                     IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap();
                 }
             }
@@ -426,7 +431,7 @@ impl Screen<'_> {
             _ if buffer.len() > 1 => match buffer {
                 [27, 120] => self.mode_line.echo_area.store_msg("Hi!"),
                 [27, 91, 68] => {
-                    if self.point.col > self.left_margin.thickness + 1 {
+                    if self.point.col > self.left_margin.thickness {
                         IO::write_esc_seq(&mut self.io.ostream, EscSeq::MvLeft(MV_LEFT)).unwrap()
                     }
                 }
@@ -640,7 +645,7 @@ impl EchoArea {
 
 /// Use the Screen builder method to construct a new LeftMargin. The thickness field is measured in
 /// terminal rows. Each row is the thickness of one character. The initial field value of LeftMargin
-/// thickness is 2, meaning two rows or about two characters. The initial seperator is '~'.
+/// thickness is 5, meaning two rows or about two characters. The initial seperator is '~'.
 /// Example shows how to change these settings. Use the screen builder method a second time to reconstruct
 /// the seperator line.
 ///
