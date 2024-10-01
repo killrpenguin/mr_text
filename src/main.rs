@@ -16,9 +16,9 @@ fn main() {
     let mut mr_text = program::MrText::<NewDocument>::new();
 
     if args.is_empty() {
-        mr_text.event_loop();
+        mr_text.run();
     } else {
         mr_text.open_doc(&args[0]);
-        mr_text.event_loop();
+        mr_text.run();
     }
 }

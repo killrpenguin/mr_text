@@ -4,7 +4,7 @@
 use smallvec::SmallVec;
 use std::{
     default,
-    io::{BufRead, Error, ErrorKind, Read},
+    io::{Error, ErrorKind, Read, Write},
 };
 
 #[derive(Debug, Default, PartialEq)]
@@ -56,7 +56,7 @@ impl<R: Read> Iterator for ParseKey<R> {
                 ret_key
             }
             Err(err) if err.kind() == ErrorKind::Interrupted => self.next(),
-            Err(err) => Some(Err(error)),
+            Err(_) => Some(Err(error)),
         }
     }
 }
@@ -64,12 +64,18 @@ impl<R: Read> Iterator for ParseKey<R> {
 pub struct KeyEvent {}
 
 impl KeyEvent {
+    pub fn pos_listener<T>(mut writer: T)
+    where
+        T: Write,
+    {
+        let _ = write!(writer, " ");
+    }
+
     pub fn parse_key<I>(item: u8, iter: &mut I) -> std::io::Result<Key>
     where
         I: Iterator<Item = std::io::Result<u8>>,
     {
         let error = Error::new(ErrorKind::Other, "Could not parse key event.");
-
         match item {
             b'\x1B' => match iter.next() {
                 Some(Ok(b'[')) => match iter.next() {
@@ -170,18 +176,16 @@ impl KeyEvent {
                     }
                     if byte == b';' {
                         ret_val.0 = pos.iter().fold(0, |acc, c| acc * 10 + (c - b'0') as u16);
-
                         pos.clear();
                     }
+
+                    if byte == b'R' && ret_val.0 != 0 {
+                        ret_val.1 = pos.iter().fold(0, |acc, c| acc * 10 + (c - b'0') as u16);
+                        return Ok(Key::CursorPos(ret_val));
+                    }
                 }
-                _ => break,
+                _ => return Err(error),
             }
-        }
-        ret_val.1 = pos.iter().fold(0, |acc, c| acc * 10 + (c - b'0') as u16);
-        if ret_val.0 != 0 && ret_val.1 != 0 {
-            Ok(Key::CursorPos(ret_val))
-        } else {
-            Err(error)
         }
     }
 }
@@ -213,7 +217,7 @@ pub enum Key {
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            Key::CursorPos((r, c)) => write!(f, "CursorPos(R: {} C: {})", r, c),
+            Key::CursorPos((r, c)) => write!(f, "R: {} C: {}", r, c),
             Key::Letter(ch) => write!(f, "{}", ch),
             Key::CtrlKey(ch) => write!(f, "CtrlKey: {}", ch),
             Key::AltKey(ch) => write!(f, "AltKey: {}", ch),
@@ -244,15 +248,13 @@ mod tests {
 
     #[test]
     fn test_parse_key_iterator() {
-        // This fails because the cursor pos escape seq is putting the position off in some way.
-        let input = "\x61\x1b\x62\x1b[23;23R\x62";
-        dbg!(input.len());
+        let input = "\x61\x1b\x62\x02\x1b[23;23R\x61";
         let mut reader = std::io::Cursor::new(input).read_key();
         assert_eq!(reader.next().unwrap().unwrap(), Key::Letter('a'));
         assert_eq!(reader.next().unwrap().unwrap(), Key::AltKey('b'));
+        assert_eq!(reader.next().unwrap().unwrap(), Key::CtrlKey('b'));
         assert_eq!(reader.next().unwrap().unwrap(), Key::CursorPos((23, 23)));
-        dbg!(&reader);
-        assert_eq!(reader.next().unwrap().unwrap(), Key::Letter('b'));
+        assert_eq!(reader.next().unwrap().unwrap(), Key::Letter('a'));
     }
 
     #[test]

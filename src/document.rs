@@ -69,12 +69,12 @@ impl NewDocument {
         self.rope.insert(self.rope.len_chars(), text)
     }
 
-    pub fn remove<R>(&mut self, char_range: R)
-    where
-        R: RangeBounds<usize>,
-    {
-        self.rope.remove(char_range)
-    }
+    // pub fn remove<R>(&mut self, char_range: R)
+
+    //     R: RangeBounds<usize>,
+    // {
+    //     self.rope.remove(char_range)
+    // }
 }
 
 pub struct Document {
@@ -88,18 +88,22 @@ pub struct Document {
 impl Doc for Document {}
 
 impl Document {
-    //TODO: Change File to Open builder.
-    pub fn load_file(name: &str) -> std::io::Result<Self> {
+    pub fn open_doc(name: &str) -> std::io::Result<Self> {
         let fl_nm = if let Some(pos) = name.chars().position(|letter| letter == '.') {
             (name[..pos].to_string(), name[pos..].to_string())
         } else {
             (name.to_string(), ".txt".to_string())
         };
         let file_name = format!("{}{}", fl_nm.0, fl_nm.1);
-        let file = match std::fs::File::open(&file_name) {
-            Ok(file) => file,
-            Err(_) => return Err(std::io::Error::last_os_error()),
-        };
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&file_name) {
+                Ok(file) => file,
+                Err(_) => return Err(std::io::Error::last_os_error()),                
+            };
+
         let reader = std::io::BufReader::new(file);
         let rope = match Rope::from_reader(reader) {
             Ok(rope) => rope,
@@ -115,7 +119,7 @@ impl Document {
     }
 
     //TODO: Change File to Open builder.
-    pub fn save_file(&self)  -> std::io::Result<()> {
+    pub fn save_file(&self) -> std::io::Result<()> {
         let file = match std::fs::File::create_new(&self.file_name) {
             Ok(file) => file,
             Err(_) => return Err(std::io::Error::last_os_error()),
@@ -127,7 +131,6 @@ impl Document {
         };
         Ok(())
     }
-
 
     pub fn update_doc_info(&mut self) {
         self.char_count = self.rope.len_chars();
@@ -152,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_load_file() {
-        let doc = Document::load_file("./text.txt").unwrap();
+        let doc = Document::open_doc("./text.txt").unwrap();
         assert_eq!(20, doc.line_count);
     }
 }

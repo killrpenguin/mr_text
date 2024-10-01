@@ -3,16 +3,13 @@
 
 extern crate libc;
 
-use std::{
-    env,
-    io::{BufRead, Error, ErrorKind, Write},
-};
+use std::io::{Error, ErrorKind, Write};
 
 use crate::{
-    document::{self, Doc, Document, NewDocument},
-    event::{self, Key, KeyEvent, ReadKey},
+    document::{Doc, Document},
+    event::{Key, ReadKey},
     ffi,
-    screen::{self, Builder, DrawScreen, Screen},
+    screen::{Builder, DrawScreen, EscSeq, Screen},
 };
 
 pub struct MrText<'a, U: Doc>
@@ -21,7 +18,6 @@ where
 {
     screen: Screen<'a>,
     docs: Vec<U>,
-    quit: Option<()>,
 }
 
 impl<'a, U> MrText<'_, U>
@@ -30,7 +26,7 @@ where
 {
     pub fn open_doc(&self, file_name: &str) {
         let mut mr_text = MrText::new();
-        if let Ok(doc) = Document::load_file(file_name) {
+        if let Ok(doc) = Document::open_doc(file_name) {
             mr_text.docs.push(doc);
         } else {
             mr_text.screen.echo_area_msg("Failed to open file.");
@@ -54,7 +50,6 @@ where
         MrText {
             screen,
             docs: Vec::with_capacity(20),
-            quit: Some(()),
         }
     }
 
@@ -62,61 +57,33 @@ where
         loop {
             match std::io::stdin().read_key().next() {
                 Some(Ok(Key::CtrlKey('q'))) => break,
-                Some(Ok(Key::AltKey(..))) => println!("unimplemented"),
-                Some(Ok(Key::CtrlKey(..))) => println!("unimplemented"),
-                Some(Err(err)) => println!("{}", err),
-                Some(Ok(key)) => {
+                Some(Ok(key @ Key::Letter(..))) => {
                     let mut ostream = std::io::stdout();
-                    match write!(ostream, "{}", key) {
+                    match write!(ostream, "{}{}", key, EscSeq::GetCursorPos) {
                         Ok(_) => {}
                         Err(err) if err.kind() == ErrorKind::Interrupted => panic!(),
                         Err(_) => println!("{}", Error::last_os_error()),
                     }
                     let _ = ostream.flush();
                 }
+                Some(Ok(output @ Key::CursorPos(pos))) => {
+                    self.screen.draw_cursor_pos(output, pos);
+                }
+                Some(Ok(Key::AltKey(..))) => continue,
+                Some(Ok(Key::CtrlKey(..))) => continue,
+                Some(Ok(..)) => continue,
+                Some(Err(err)) => println!("{}", err),
                 None => break,
             }
         }
-    }
-
-    pub fn quit(&mut self) {
-        self.quit.take().expect("How could this fail?")
     }
 
     pub fn run(&mut self) {
-        loop {
-            match self.screen.ascii_strategy() {
-                Some(()) => {}
-                None => break,
-            }
-            self.screen.update_point::<std::io::Stdout>().unwrap_or(());
-            self.screen.draw_numbered_lm();
-            self.screen.draw_ml_area();
-            self.screen.clr_echo_area_timer();
-        }
+        self.event_loop();
 
         self.screen.clear_screen();
         let mut drop_stream = std::io::stdin();
         let _revert_on_drop =
             ffi::RevertOnDrop::new(&mut drop_stream, self.screen.copy_original_term());
-    }
-}
-
-pub enum ProgramState {
-    IO,
-    KeyChord(Key),
-}
-
-// The following states can be the T in Program
-#[derive(Debug, Default, Clone)]
-pub struct KeyChordState {
-    keys: Vec<Key>,
-}
-
-impl<'a> KeyChordState {
-    fn new() -> Self {
-        KeyChordState {
-            keys: Vec::with_capacity(10),
-        }
     }
 }

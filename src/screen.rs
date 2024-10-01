@@ -1,7 +1,10 @@
 #![allow(unused_imports, unused_variables)]
 #![allow(dead_code)]
 
-use crate::ffi;
+use crate::{
+    event::{Key, ReadKey},
+    ffi,
+};
 use ropey::Rope;
 use std::{
     fmt::Display,
@@ -15,7 +18,6 @@ pub struct Screen<'a> {
     left_margin: LeftMargin<'a>,
     point: Point,
     original_term: Option<libc::termios>,
-    arena: bumpalo::Bump,
     winsize_row: u16,
     winsize_col: u16,
 }
@@ -33,7 +35,6 @@ impl<'a> Screen<'a> {
             left_margin: LeftMargin::default(),
             point: Point::default(),
             original_term: None,
-            arena: bumpalo::Bump::new(),
             winsize_row: winsize.ws_row,
             winsize_col: winsize.ws_col,
         }
@@ -116,59 +117,6 @@ impl<'a> Screen<'a> {
         Ok(())
     }
 
-    pub fn update_point<W>(&mut self) -> Option<()> {
-        let mut lock = stdin().lock();
-        let mut ostream = stdout();
-        let _ = Screen::my_write(&mut ostream, REQ_CURSOR_POS)
-            .map_err(|e| self.mode_line.echo_area.store_error(e));
-
-        let buf = match lock.fill_buf() {
-            Ok(buf) if buf.len() >= ESC_SEQ_LEN => buf,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {
-                return None;
-            }
-            _error => {
-                self.mode_line.echo_area.store_error(Error::last_os_error());
-                return None;
-            }
-        };
-
-        let len = buf.len();
-        let semicolon = match buf.iter().position(|chr| *chr == SEMICOLON) {
-            Some(idx) => idx,
-            None => {
-                lock.consume(len);
-                return None;
-            }
-        };
-
-        if let Some(row) = from_utf8_escape_seq(buf, 2_usize, semicolon) {
-            self.point.row = match row.parse::<u16>() {
-                Ok(num) => num,
-                Err(err) => {
-                    self.mode_line.echo_area.store_error(err);
-                    lock.consume(len);
-                    return None;
-                }
-            };
-        }
-
-        let trim = (semicolon + 1, len - 1);
-        if let Some(col) = from_utf8_escape_seq(buf, trim.0, trim.1) {
-            self.point.col = match col.parse::<u16>() {
-                Ok(num) => num,
-                Err(err) => {
-                    self.mode_line.echo_area.store_error(err);
-                    lock.consume(len);
-                    return None;
-                }
-            };
-        }
-
-        lock.consume(len);
-        Some(())
-    }
-
     pub fn scroll(&mut self, dir: Scroll) {
         let mut ostream = stdout();
         let dir_settings = match dir {
@@ -197,196 +145,49 @@ impl<'a> Screen<'a> {
         self.draw_ml_area();
         let _ = self.point.go_home(&mut ostream);
     }
-    pub fn ascii_strategy(&mut self) -> Option<()> {
-        let mut lock = stdin().lock();
-        let mut ostream = stdout();
-
-        let buffer = match lock.fill_buf() {
-            Ok(buf) => buf,
-            Err(e) if e.kind() == ErrorKind::Interrupted => lock.fill_buf().unwrap(),
-            error => error.unwrap(),
-        };
-
-        let read_len = buffer.len();
-        self.mode_line
-            .echo_area
-            .store_message(std::str::from_utf8(buffer).unwrap());
-        match buffer {
-            [0..=31] => match self.ctrl_keys_strategy(buffer) {
-                Some(()) => {
-                    lock.consume(read_len);
-                    return Some(());
-                }
-                None => {
-                    lock.consume(read_len);
-                    return None;
-                }
-            },
-            [32..=126] => {
-                // Ascii visible chars
-                let input = match std::str::from_utf8(buffer) {
-                    Ok(input) => input,
-                    Err(error) => match error.error_len() {
-                        // TODO: What to do with after_valid?
-                        Some(_len) => {
-                            let (valid, _after_valid) = buffer.split_at(error.valid_up_to());
-                            if !valid.is_empty() {
-                                unsafe { std::str::from_utf8_unchecked(valid) }
-                            } else {
-                                return Some(());
-                            }
-                        }
-                        None => return Some(()), // char could be valid once utf8 is better implemented.
-                    },
-                };
-                self.text_window
-                    .rope
-                    .insert(self.text_window.rope.len_chars(), input);
-
-                if self.point.col > self.winsize_col {
-                    // reposition cursor at start of new line.
-                    let _ = Screen::move_cursor::<std::io::Stdout>(
-                        &mut ostream,
-                        self.point.row + 1,
-                        self.left_margin.thickness,
-                    )
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-
-                    self.text_window
-                        .rope
-                        .insert(self.text_window.rope.len_chars(), "\r\n");
-                }
-                let _ = Screen::my_write(&mut ostream, input)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-            }
-            [127] => {
-                // This doesn't account for \r\n inserts.
-                if self.text_window.rope.len_chars() != 0 {
-                    self.text_window
-                        .rope
-                        .remove(self.text_window.rope.len_chars() - 1..);
-                }
-                if self.point.col > self.mode_line.thickness {
-                    let _ = Screen::my_write(&mut ostream, MV_LEFT)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                    let _ = Screen::my_write(&mut ostream, CLR_LN_CURSR_END)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                }
-            }
-            _ if buffer.len() > 1 => match buffer {
-                [27, 120] => self.mode_line.echo_area.store_message("Hi!"),
-                [27, 91, 68] if self.point.col > self.left_margin.thickness + 1 => {
-                    let _ = Screen::my_write(&mut ostream, MV_LEFT)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                }
-                [27, 91, 67] if self.point.col as usize > self.text_window.cur_line => {
-                    let _ = Screen::my_write(&mut ostream, MV_RIGHT)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                }
-                [27, 91, 66] => {
-                    // Down Arrow
-                    if self.point.row <= self.winsize_row - self.mode_line.thickness {
-                        let _ = Screen::my_write(&mut ostream, MV_DOWN)
-                            .map_err(|e| self.mode_line.echo_area.store_error(e));
-                    } else {
-                        self.scroll(Scroll::Down)
-                    }
-                }
-                [27, 91, 65] => {
-                    // Up Arrow
-                    if self.point.row == 1 {
-                        self.scroll(Scroll::Up)
-                    } else {
-                        let _ = Screen::my_write(&mut ostream, MV_UP)
-                            .map_err(|e| self.mode_line.echo_area.store_error(e));
-                    }
-                }
-                _ => self.mode_line.echo_area.store_message("Key unimplemented"),
-            },
-            _ => self.mode_line.echo_area.store_message("Key unimplemented"),
-        }
-
-        lock.consume(read_len);
-        Some(())
-    }
-
-    pub fn ctrl_keys_strategy(&mut self, buffer: &[u8]) -> Option<()> {
-        let mut ostream = stdout();
-        match buffer {
-            // + 1 for the space after the margin line.
-            [2] if self.point.col > self.left_margin.thickness => {
-                let _ = Screen::my_write(&mut ostream, MV_LEFT)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-            }
-            // TODO: Switch back to less than once cur_line is more than a place holder.
-            [6] if self.point.col as usize > self.text_window.cur_line => {
-                let _ = Screen::my_write(&mut ostream, MV_RIGHT)
-                    .map_err(|e| self.mode_line.echo_area.store_error(e));
-            }
-            [9] => {
-                // tab
-                let _ = Screen::my_write(&mut ostream, "\t");
-                self.text_window
-                    .rope
-                    .insert(self.text_window.rope.len_chars(), "\t");
-            }
-            [10] => {
-                // Enter
-                self.text_window
-                    .rope
-                    .insert(self.text_window.rope.len_chars(), "\n");
-
-                if self.point.row <= self.text_window.bottom_ln {
-                    let _ = Screen::move_cursor(
-                        &mut ostream,
-                        self.point.row + 1,
-                        self.left_margin.thickness,
-                    );
-                } else {
-                    self.scroll(Scroll::Down)
-                }
-            }
-            [14] => {
-                // ctrl + n
-                if self.point.row <= self.text_window.bottom_ln {
-                    let _ = Screen::my_write(&mut ostream, MV_DOWN)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                } else {
-                    self.scroll(Scroll::Down)
-                }
-            }
-            [16] => {
-                // ctrl + p
-                if self.point.row == 1 {
-                    self.scroll(Scroll::Up)
-                } else {
-                    let _ = Screen::my_write(&mut ostream, MV_UP)
-                        .map_err(|e| self.mode_line.echo_area.store_error(e));
-                }
-            }
-            [17] => {
-                // ctrl + q
-                return None;
-            }
-            _ => self.mode_line.echo_area.store_message("Key unimplemented"),
-        }
-        Some(())
-    }
 }
 
 pub enum Scroll {
     Up,
     Down,
 }
+
 pub trait DrawScreen {
     fn draw_screen(&mut self);
     fn draw_ml_area(&mut self);
     fn draw_ml(&mut self);
     fn draw_numbered_lm(&mut self);
+    fn draw_cursor_pos(&mut self, pos: Key, pos: (u16, u16));
     fn clear_screen(&mut self);
 }
 
 impl DrawScreen for Screen<'_> {
+    fn draw_cursor_pos(&mut self, output: Key, pos: (u16, u16)) {
+        self.point.row = pos.0;
+        self.point.col = pos.1;
+        let mut ostream = stdout();
+        match write!(
+            ostream,
+            "{}{}{}{}",
+            EscSeq::HideCursor,
+            EscSeq::MoveCursor((self.winsize_row, 0)),
+            EscSeq::ClrLn,
+            output
+        ) {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::Interrupted => self.clear_screen(),
+            Err(err) => self.mode_line.echo_area.store_error(err),
+        }
+        match ostream.flush() {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::Interrupted => {
+                ostream.flush().expect("Interrupted then failed to unwrap.")
+            }
+            Err(err) => self.mode_line.echo_area.store_error(err),
+        }
+        let _ = self.point.go_home(&mut ostream);
+    }
+
     fn clear_screen(&mut self) {
         let mut ostream = stdout();
         match write!(ostream, "{}", CLR_SCRN,) {
